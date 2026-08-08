@@ -1,0 +1,18 @@
+# Core numerical stack
+numpy
+torch
+
+# Plotting and notebooks
+matplotlib
+seaborn
+ipython
+
+# Utilities used by the scripts
+scipy
+imageio
+tqdm
+
+# Used by compare_loglikelihood.py
+gpytorch
+
+# FEniCS / dolfin is required separately and is intentionally not listed here.
