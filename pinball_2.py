@@ -696,30 +696,30 @@ def main():
     # model.eval()
     
     # Train the model using the unified training function
-    # history = train_np(
-    #     train_loader=train_loader,
-    #     model=model,
-    #     optimizer=optimizer,
-    #     loss_fn=criterion,
-    #     device=device,
-    #     epochs=num_epochs,  # Reduced: 1000 was excessive, monitor for convergence
-    #     val_loader=val_loader,
-    #     scheduler=scheduler,
-    #     gradient_clip=1.0,  # Gradient clipping for stability
-    #     early_stopping_patience=1000,
-    #     is_meta_learning=True,  # Enable Neural Process mode
-    #     verbose=True,
-    #     print_every=10,  # Print every 10 epochs
-    #     checkpoint_dir=str(checkpoints_dir),  # Directory to save checkpoints
-    #     beta_schedule=beta_schedule,
-    #     early_stopping_start_epoch=200,  # Don't consider early stopping until after 200 epochs
-    # )
+    history = train_np(
+        train_loader=train_loader,
+        model=model,
+        optimizer=optimizer,
+        loss_fn=criterion,
+        device=device,
+        epochs=num_epochs,  # Reduced: 1000 was excessive, monitor for convergence
+        val_loader=val_loader,
+        scheduler=scheduler,
+        gradient_clip=1.0,  # Gradient clipping for stability
+        early_stopping_patience=1000,
+        is_meta_learning=True,  # Enable Neural Process mode
+        verbose=True,
+        print_every=10,  # Print every 10 epochs
+        checkpoint_dir=str(checkpoints_dir),  # Directory to save checkpoints
+        beta_schedule=beta_schedule,
+        early_stopping_start_epoch=200,  # Don't consider early stopping until after 200 epochs
+    )
 
-    # print("\nTraining complete!")
-    # print(f"Final train loss: {history['train_loss'][-1]:.4f}")
-    # print(f"Final val loss: {history['val_loss'][-1]:.4f}")
-    # print(f"Final KL divergence: {history['train_kl'][-1]:.4f}")
-    # print(f"Final reconstruction: {history['train_recon'][-1]:.4f}")
+    print("\nTraining complete!")
+    print(f"Final train loss: {history['train_loss'][-1]:.4f}")
+    print(f"Final val loss: {history['val_loss'][-1]:.4f}")
+    print(f"Final KL divergence: {history['train_kl'][-1]:.4f}")
+    print(f"Final reconstruction: {history['train_recon'][-1]:.4f}")
     
     best_model_path = checkpoints_dir / "best_model.pt"
     checkpoint = torch.load(best_model_path, map_location=device)
