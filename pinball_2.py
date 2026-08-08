@@ -727,7 +727,6 @@ def main():
         model.load_state_dict(checkpoint["model_state_dict"])
     else:
         model.load_state_dict(checkpoint)
-    model.eval()
     
     # ============================================================
     # TEST SET PREDICTIONS WITH BATCH FROM 3 TEST SAMPLES
