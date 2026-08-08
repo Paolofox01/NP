@@ -354,9 +354,7 @@ def plot_with_colorbar(y, Yh, ax=None, cmap="jet", vmin=None, vmax=None, label=N
     cbar.set_label(label, size=16)
     return mappable
 
-def main():
-    
-    USE_MU = True
+def run_experiment(USE_MU):
     
     script_dir = Path(__file__).resolve().parent
     logs_dir = script_dir / f"logs_pinball_{'mu' if USE_MU else 'no_mu'}_new_5sens"
@@ -1383,6 +1381,11 @@ def main():
     plt.tight_layout()
     plt.show()
     fig.savefig(logs_dir / "ground_truth_sensors.png", dpi=300, bbox_inches="tight")
+
+def main():
+    for USE_MU in [True, False]:
+        print(f"\n{'=' * 80}\nRUNNING EXPERIMENT WITH USE_MU={USE_MU}\n{'=' * 80}")
+        run_experiment(USE_MU)
 
 if __name__ == "__main__":
     main()
