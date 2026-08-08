@@ -373,11 +373,7 @@ def plot_with_colorbar(y, Yh, ax=None, cmap="jet", vmin=None, vmax=None, label=N
     cbar.set_label(label, size=16)
     return mappable
 
-def main():
-    
-    USE_MU = True
-    USE_BT_TIME = False   # True -> use LatNP_simple_bttime, False -> use LatNP_simple   
-    ESTIMATE_PARAMS = False
+def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False):
     
     print(f"USE_MU: {USE_MU}, USE_BT_TIME: {USE_BT_TIME}")
     
@@ -720,93 +716,93 @@ def main():
     beta_schedule_p1 = [0.0] * epochs_p1
     
     # Create a specific directory for Phase 1 checkpoints
-    # p1_checkpoints_dir = checkpoints_dir / "phase1"
-    # p1_checkpoints_dir.mkdir(exist_ok=True)
+    p1_checkpoints_dir = checkpoints_dir / "phase1"
+    p1_checkpoints_dir.mkdir(exist_ok=True)
     
-    # train_np(
-    #     train_loader=train_loader,
-    #     model=model,
-    #     optimizer=optimizer_p1,
-    #     loss_fn=criterion,
-    #     device=device,
-    #     epochs=epochs_p1,
-    #     val_loader=val_loader,
-    #     scheduler=None,           # Keep learning rate perfectly flat
-    #     gradient_clip=1.0,
-    #     early_stopping_patience=1000, # Disable early stopping during warmup
-    #     is_meta_learning=True,
-    #     verbose=True,
-    #     print_every=10,
-    #     checkpoint_dir=str(p1_checkpoints_dir),
-    #     beta_schedule=beta_schedule_p1,
-    #     early_stopping_start_epoch=epochs_p1 + 1 
-    # )
+    train_np(
+        train_loader=train_loader,
+        model=model,
+        optimizer=optimizer_p1,
+        loss_fn=criterion,
+        device=device,
+        epochs=epochs_p1,
+        val_loader=val_loader,
+        scheduler=None,           # Keep learning rate perfectly flat
+        gradient_clip=1.0,
+        early_stopping_patience=1000, # Disable early stopping during warmup
+        is_meta_learning=True,
+        verbose=True,
+        print_every=10,
+        checkpoint_dir=str(p1_checkpoints_dir),
+        beta_schedule=beta_schedule_p1,
+        early_stopping_start_epoch=epochs_p1 + 1 
+    )
     
-    # # Save a guaranteed complete Phase 1 checkpoint
-    # phase1_complete_path = checkpoints_dir / "phase1_complete.pt"
-    # torch.save(model.state_dict(), phase1_complete_path)
-    # print(f"\nPhase 1 Complete! Model saved to {phase1_complete_path}")
+    # Save a guaranteed complete Phase 1 checkpoint
+    phase1_complete_path = checkpoints_dir / "phase1_complete.pt"
+    torch.save(model.state_dict(), phase1_complete_path)
+    print(f"\nPhase 1 Complete! Model saved to {phase1_complete_path}")
 
 
-    # # =====================================================================
-    # # PHASE 2: STOCHASTIC FINE-TUNING (LR Spike+Decay, Latent Active, Beta Ramp)
-    # # =====================================================================
-    # print("\n" + "=" * 60)
-    # print("PHASE 2: STOCHASTIC FINE-TUNING (4500 Epochs)")
-    # print("=" * 60)
+    # =====================================================================
+    # PHASE 2: STOCHASTIC FINE-TUNING (LR Spike+Decay, Latent Active, Beta Ramp)
+    # =====================================================================
+    print("\n" + "=" * 60)
+    print("PHASE 2: STOCHASTIC FINE-TUNING (4500 Epochs)")
+    print("=" * 60)
     
-    # epochs_p2 = 4500
-    # ramp_epochs = 1000
+    epochs_p2 = 4500
+    ramp_epochs = 1000
     
-    # # Note: I strongly recommend 0.1 instead of 1.0 to prevent the collapse you saw earlier.
-    # # If you want to try 1.0 again, change this variable.
-    # beta_target = 1.0 
+    # Note: I strongly recommend 0.1 instead of 1.0 to prevent the collapse you saw earlier.
+    # If you want to try 1.0 again, change this variable.
+    beta_target = 1.0 
     
-    # # 1. Reload the best warmup weights (safety net)
-    # model.load_state_dict(torch.load(phase1_complete_path, map_location=device))
+    # 1. Reload the best warmup weights (safety net)
+    model.load_state_dict(torch.load(phase1_complete_path, map_location=device))
     
-    # # 2. Unfreeze the latent space!
-    # for param in model.latent.parameters():
-    #     param.requires_grad = True
+    # 2. Unfreeze the latent space!
+    for param in model.latent.parameters():
+        param.requires_grad = True
         
-    # # 3. Setup Phase 2 Optimizer (THE SPIKE: Jump up to 5e-4)
-    # optimizer_p2 = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
+    # 3. Setup Phase 2 Optimizer (THE SPIKE: Jump up to 5e-4)
+    optimizer_p2 = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
     
-    # # 4. Setup Phase 2 Scheduler (THE DECAY: Cosine curve from 5e-4 down to 1e-6)
-    # scheduler_p2 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_p2, mode='min', factor=0.5, patience=128, min_lr=1e-6)
+    # 4. Setup Phase 2 Scheduler (THE DECAY: Cosine curve from 5e-4 down to 1e-6)
+    scheduler_p2 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_p2, mode='min', factor=0.5, patience=128, min_lr=1e-6)
     
-    # # 5. Setup Phase 2 Beta Schedule (Ramp up to target, then hold)
-    # beta_schedule_p2 = [beta_target * (e / ramp_epochs) for e in range(ramp_epochs)] + \
-    #                    [beta_target] * (epochs_p2 - ramp_epochs)
+    # 5. Setup Phase 2 Beta Schedule (Ramp up to target, then hold)
+    beta_schedule_p2 = [beta_target * (e / ramp_epochs) for e in range(ramp_epochs)] + \
+                       [beta_target] * (epochs_p2 - ramp_epochs)
                        
     # # Create specific directory for Phase 2 checkpoints
     p2_checkpoints_dir = checkpoints_dir / "phase2"
     p2_checkpoints_dir.mkdir(exist_ok=True)
     
-    # history = train_np(
-    #     train_loader=train_loader,
-    #     model=model,
-    #     optimizer=optimizer_p2,
-    #     loss_fn=criterion,
-    #     device=device,
-    #     epochs=epochs_p2,
-    #     val_loader=val_loader,
-    #     scheduler=scheduler_p2,
-    #     gradient_clip=1.0,
-    #     early_stopping_patience=1000, 
-    #     is_meta_learning=True,
-    #     verbose=True,
-    #     print_every=10,
-    #     checkpoint_dir=str(p2_checkpoints_dir),
-    #     beta_schedule=beta_schedule_p2,
-    #     early_stopping_start_epoch=ramp_epochs # Don't allow early stopping until the beta ramp is finished
-    # )
+    history = train_np(
+        train_loader=train_loader,
+        model=model,
+        optimizer=optimizer_p2,
+        loss_fn=criterion,
+        device=device,
+        epochs=epochs_p2,
+        val_loader=val_loader,
+        scheduler=scheduler_p2,
+        gradient_clip=1.0,
+        early_stopping_patience=1000, 
+        is_meta_learning=True,
+        verbose=True,
+        print_every=10,
+        checkpoint_dir=str(p2_checkpoints_dir),
+        beta_schedule=beta_schedule_p2,
+        early_stopping_start_epoch=ramp_epochs # Don't allow early stopping until the beta ramp is finished
+    )
 
-    # print("\nTraining completely finished!")
-    # print(f"Final train loss: {history['train_loss'][-1]:.4f}")
-    # print(f"Final val loss: {history['val_loss'][-1]:.4f}")
-    # print(f"Final KL divergence: {history['train_kl'][-1]:.4f}")
-    # print(f"Final reconstruction: {history['train_recon'][-1]:.4f}")
+    print("\nTraining completely finished!")
+    print(f"Final train loss: {history['train_loss'][-1]:.4f}")
+    print(f"Final val loss: {history['val_loss'][-1]:.4f}")
+    print(f"Final KL divergence: {history['train_kl'][-1]:.4f}")
+    print(f"Final reconstruction: {history['train_recon'][-1]:.4f}")
     
     # Load the absolute best model from Phase 2 for testing
     best_model_path = p2_checkpoints_dir / "best_model.pt"
@@ -1353,6 +1349,11 @@ def main():
     plt.tight_layout()
     plt.show()
     fig.savefig(logs_dir / "ground_truth_sensors.png", dpi=300, bbox_inches="tight")
+
+def main():
+    for USE_MU in [True, False]:
+        print(f"\n{'=' * 80}\nRUNNING EXPERIMENT WITH USE_MU={USE_MU}\n{'=' * 80}")
+        run_experiment(USE_MU=USE_MU)
 
 if __name__ == "__main__":
     main()
