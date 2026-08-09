@@ -88,7 +88,7 @@ def deeponet_collate_fn(
 
     if use_mu:
         batch_mus = batch_mus.to(device)
-        mu_history = batch_mus.unsqueeze(1).expand(-1, history_length, -1)
+        mu_history = batch_mus[batch_indices_2d, time_windows]
         sensor_history = torch.cat([sensor_history_3d, t_repeated, mu_history], dim=-1)
     else:
         sensor_history = torch.cat([sensor_history_3d, t_repeated], dim=-1)
@@ -141,7 +141,7 @@ def build_don_eval_inputs(
 
     if use_mu:
         batch_mus = batch_mus.to(device)
-        mu_history = batch_mus.unsqueeze(1).expand(-1, history_length, -1)
+        mu_history = batch_mus[:, time_window]
         sensor_history = torch.cat([sensor_history_3d, t_repeated, mu_history], dim=-1)
     else:
         sensor_history = torch.cat([sensor_history_3d, t_repeated], dim=-1)
@@ -511,7 +511,7 @@ def main():
 
     mesh_coords_tensor = torch.tensor(mesh_coordinates, dtype=torch.float32)
 
-    for use_mu in [False, True]:
+    for use_mu in [True, False]:
         train_dataset = TrajectoryDataset(Ytrain, mu=MUtrain if use_mu else None)
         val_dataset = TrajectoryDataset(Yvalid, mu=MUvalid if use_mu else None)
         test_dataset = TrajectoryDataset(Ytest, mu=MUtest if use_mu else None)
