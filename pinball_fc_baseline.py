@@ -501,11 +501,24 @@ def run_experiment(USE_MU):
     # Visualizing specific batch
     test_indices = [0, 1, 2] 
     test_batch = [test_dataset[idx] for idx in test_indices]
-    
-    trajectories_test = torch.stack([item[0] for item in test_batch])
-    
+
     history_length = 20
-    time_idx = 30  
+    time_idx = 30
+    batch_size = len(test_batch)
+
+    if isinstance(test_batch[0], (tuple, list)):
+        trajectories_test = torch.stack([item[0] for item in test_batch])
+        if USE_MU:
+            mu_test_batch = torch.stack([item[1] for item in test_batch]).to(device)
+            mu_test_batch = mu_test_batch.view(batch_size, ntimes, -1)
+            static_params = mu_test_batch[:, time_idx, :]
+        else:
+            static_params = None
+    else:
+        trajectories_test = torch.stack(test_batch)
+        static_params = None
+    
+    batch_size = trajectories_test.shape[0]
     
     # ---------------------------------------------------------
     # CORRECTED: Branch Input Extraction (Relative Time)
@@ -513,25 +526,16 @@ def run_experiment(USE_MU):
     history_window = trajectories_test[:, time_idx - history_length + 1 : time_idx + 1, fixed_sens].to(device)
     
     offsets = torch.arange(-history_length + 1, 1, dtype=torch.float32).to(device)
-    t_col = (offsets / float(ntimes)).unsqueeze(0).unsqueeze(-1).expand(3, history_length, 1)
+    t_col = (offsets / float(ntimes)).unsqueeze(0).unsqueeze(-1).expand(batch_size, history_length, 1)
     
     # --- CHANGED: sensor_history strictly contains (sensors + time) ---
     sensor_history = torch.cat([history_window, t_col], dim=-1)
     
-    # --- CHANGED: Extract static params separately ---
-    if USE_MU:
-        mu_test_batch = torch.stack([item[1] for item in test_batch]).to(device)
-        mu_test_batch = mu_test_batch.view(3, ntimes, -1)
-        # Extract the parameter exactly at the target time index. Shape: (3, num_params)
-        static_params = mu_test_batch[:, time_idx, :]
-    else:
-        static_params = None
-    
     # ---------------------------------------------------------
     # CORRECTED: Trunk Input Extraction (Target Time = 0.0)
     # ---------------------------------------------------------
-    t_norm = torch.zeros((3, nstate, 1), dtype=torch.float32).to(device)
-    spatial_coords = mesh_coords_tensor.unsqueeze(0).expand(3, -1, -1).to(device)
+    t_norm = torch.zeros((batch_size, nstate, 1), dtype=torch.float32).to(device)
+    spatial_coords = mesh_coords_tensor.unsqueeze(0).expand(batch_size, -1, -1).to(device)
     full_coords = torch.cat([t_norm, spatial_coords], dim=-1)
     
     # Target Ground Truth
