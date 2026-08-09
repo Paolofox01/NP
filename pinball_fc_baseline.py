@@ -339,13 +339,7 @@ def plot_with_colorbar(y, Yh, ax=None, cmap="jet", vmin=None, vmax=None, label=N
 # MAIN PIPELINE
 # ==============================================================================
 
-def main():
-    # ==========================================================================
-    # TOGGLE MU HERE
-    # ==========================================================================
-    USE_MU = False  # Set to False to run completely without physical parameters
-    # ==========================================================================
-
+def run_experiment(USE_MU):
     script_dir = Path(__file__).resolve().parent
     logs_dir = script_dir / f"logs_pinball_fc_baseline_{'with_mu' if USE_MU else 'without_mu'}"
     checkpoints_dir = script_dir / f"checkpoints_pinball_fc_baseline_{'with_mu' if USE_MU else 'without_mu'}"
@@ -420,9 +414,9 @@ def main():
     # --------------------------------------------------------------------------
     # 3. Setup Training Components
     # --------------------------------------------------------------------------
-    train_dataset = TrajectoryDataset(Ytrain, mu=MUtrain)
-    val_dataset = TrajectoryDataset(Yvalid, mu=MUvalid)
-    test_dataset = TrajectoryDataset(Ytest, mu=MUtest)
+    train_dataset = TrajectoryDataset(Ytrain, mu=MUtrain if USE_MU else None)
+    val_dataset = TrajectoryDataset(Yvalid, mu=MUvalid if USE_MU else None)
+    test_dataset = TrajectoryDataset(Ytest, mu=MUtest if USE_MU else None)
 
     batch_size = 16
     collate = partial(
@@ -606,6 +600,11 @@ def main():
         
         print(f"1x5 Grid plot saved to {grid_path}")
 
+
+def main():
+    for USE_MU in [False, True]:
+        print(f"\n{'=' * 80}\nRUNNING EXPERIMENT WITH USE_MU={USE_MU}\n{'=' * 80}")
+        run_experiment(USE_MU)
 
 if __name__ == "__main__":
     main()
