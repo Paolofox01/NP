@@ -13,6 +13,7 @@ from dolfin import *
 
 # Assuming these are available in your local directory structure
 from architectures.Fourier import FourierFeatures, LearnableFourierFeatures
+from pinball_paths import resolve_pinball_asset
 from processdata import multiplot, trajectories
 from torch.utils.data import DataLoader, Dataset
 
