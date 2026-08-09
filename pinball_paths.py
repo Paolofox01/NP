@@ -4,7 +4,25 @@ from pathlib import Path
 
 
 def resolve_pinball_asset(script_dir: Path, filename: str) -> Path:
-    candidates = [script_dir / filename, script_dir / "Pinball" / filename]
+    script_dir = Path(script_dir).resolve()
+    seen = set()
+    candidates = []
+
+    def add_candidate(path: Path) -> None:
+        path = path.resolve(strict=False)
+        if path not in seen:
+            seen.add(path)
+            candidates.append(path)
+
+    for base in [script_dir, script_dir.parent, Path.cwd(), Path.cwd().parent]:
+        add_candidate(base / filename)
+        add_candidate(base / "Pinball" / filename)
+        add_candidate(base / "assets" / filename)
+
+    for parent in [script_dir, *script_dir.parents]:
+        add_candidate(parent / filename)
+        add_candidate(parent / "Pinball" / filename)
+
     for candidate in candidates:
         if candidate.exists():
             return candidate
