@@ -13,6 +13,7 @@ from dolfin import *
 
 # Assuming these are available in your local directory structure
 from architectures.Fourier import FourierFeatures
+from pinball_paths import resolve_pinball_asset
 from processdata import multiplot, trajectories
 from torch.utils.data import DataLoader, Dataset
 
@@ -510,31 +511,25 @@ def main():
 
     mesh_coords_tensor = torch.tensor(mesh_coordinates, dtype=torch.float32)
 
-    train_dataset = TrajectoryDataset(Ytrain, mu=MUtrain)
-    val_dataset = TrajectoryDataset(Yvalid, mu=MUvalid)
-    test_dataset = TrajectoryDataset(Ytest, mu=MUtest)
+    for use_mu in [False, True]:
+        train_dataset = TrajectoryDataset(Ytrain, mu=MUtrain if use_mu else None)
+        val_dataset = TrajectoryDataset(Yvalid, mu=MUvalid if use_mu else None)
+        test_dataset = TrajectoryDataset(Ytest, mu=MUtest if use_mu else None)
 
-    # --------------------------------------------------------------------------
-    # Run the model WITHOUT parameters
-    # --------------------------------------------------------------------------
-    run_experiment(
-        use_mu=False, 
-        train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset,
-        fixed_sens=fixed_sens, mesh_coords_tensor=mesh_coords_tensor, 
-        ntimes=ntimes, nstate=nstate, nparams=nparams, 
-        Yh=Yh, sensor_coords=sensor_coords, script_dir=script_dir
-    )
-
-    # --------------------------------------------------------------------------
-    # Run the model WITH parameters
-    # --------------------------------------------------------------------------
-    run_experiment(
-        use_mu=True, 
-        train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset,
-        fixed_sens=fixed_sens, mesh_coords_tensor=mesh_coords_tensor, 
-        ntimes=ntimes, nstate=nstate, nparams=nparams,
-        Yh=Yh, sensor_coords=sensor_coords, script_dir=script_dir
-    )
+        run_experiment(
+            use_mu=use_mu,
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            test_dataset=test_dataset,
+            fixed_sens=fixed_sens,
+            mesh_coords_tensor=mesh_coords_tensor,
+            ntimes=ntimes,
+            nstate=nstate,
+            nparams=nparams,
+            Yh=Yh,
+            sensor_coords=sensor_coords,
+            script_dir=script_dir,
+        )
 
 
 if __name__ == "__main__":
