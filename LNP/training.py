@@ -128,7 +128,7 @@ def train_np(
         train_loss, train_metric, train_recon, train_kl, train_param = 0.0, 0.0, 0.0, 0.0, 0.0
         num_batches = 0
         
-        iterator = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}") if verbose else train_loader
+        iterator = train_loader#tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}") if verbose else train_loader
         
         for batch in iterator:
             # TRASFERIMENTO DATI ASINCRONO E PULITO
