@@ -373,13 +373,13 @@ def plot_with_colorbar(y, Yh, ax=None, cmap="jet", vmin=None, vmax=None, label=N
     cbar.set_label(label, size=16)
     return mappable
 
-def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False):
+def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONET_DECODER=False):
     
-    print(f"USE_MU: {USE_MU}, USE_BT_TIME: {USE_BT_TIME}")
+    print(f"USE_MU: {USE_MU}, USE_BT_TIME: {USE_BT_TIME}, USE_DEEPONET_DECODER: {USE_DEEPONET_DECODER}")
     
     script_dir = Path(__file__).resolve().parent
-    logs_dir = script_dir / f"logs_pinball_{'bt' if USE_BT_TIME else 'no_bt'}_{'mu' if USE_MU else 'no_mu'}_3"
-    checkpoints_dir = script_dir / f"checkpoints_pinball_{'bt' if USE_BT_TIME else 'no_bt'}_{'mu' if USE_MU else 'no_mu'}_3"
+    logs_dir = script_dir / f"logs_pinball_{'dndec' if USE_DEEPONET_DECODER else 'no_dndec'}_{'mu' if USE_MU else 'no_mu'}_3"
+    checkpoints_dir = script_dir / f"checkpoints_pinball_{'dndec' if USE_DEEPONET_DECODER else 'no_dndec'}_{'mu' if USE_MU else 'no_mu'}_3"
     logs_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     
@@ -564,7 +564,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False):
                         mesh_coords=mesh_coordinates_norm,
                         fixed_sensor_locations=fixed_sens,
                         use_all_sensors=True,
-                        drop_random_sensors_options=[0],
+                        drop_random_sensors_options=[0, 1],
                         return_mu_as_label=ESTIMATE_PARAMS)
     )
 
@@ -578,7 +578,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False):
                         mesh_coords=mesh_coordinates_norm,
                         fixed_sensor_locations=fixed_sens,
                         use_all_sensors=True,
-                        drop_random_sensors_options=[0],
+                        drop_random_sensors_options=[0, 1],
                         return_mu_as_label=ESTIMATE_PARAMS)
     )
 
@@ -633,7 +633,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False):
             num_frequencies=32,
             fourier_scale=1.0,
             learnable_fourier=True,
-            use_deeponet_decoder=True,
+            use_deeponet_decoder=USE_DEEPONET_DECODER,
         ).to(device)
 
         time_feature_idx = 3 if USE_MU else 0
@@ -654,7 +654,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False):
             num_frequencies=32,
             fourier_scale=1.0,
             learnable_fourier=True,
-            use_deeponet_decoder=True,
+            use_deeponet_decoder=USE_DEEPONET_DECODER,
             parameter_estimation=3 if ESTIMATE_PARAMS else 0
         ).to(device)
         
@@ -731,7 +731,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False):
         gradient_clip=1.0,
         early_stopping_patience=1000, # Disable early stopping during warmup
         is_meta_learning=True,
-        verbose=True,
+        verbose=False,
         print_every=10,
         checkpoint_dir=str(p1_checkpoints_dir),
         beta_schedule=beta_schedule_p1,
@@ -791,7 +791,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False):
         gradient_clip=1.0,
         early_stopping_patience=1000, 
         is_meta_learning=True,
-        verbose=True,
+        verbose=False,
         print_every=10,
         checkpoint_dir=str(p2_checkpoints_dir),
         beta_schedule=beta_schedule_p2,
@@ -1352,8 +1352,9 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False):
 
 def main():
     for USE_MU in [True, False]:
-        print(f"\n{'=' * 80}\nRUNNING EXPERIMENT WITH USE_MU={USE_MU}\n{'=' * 80}")
-        run_experiment(USE_MU=USE_MU)
+        for USE_DEEPONET_DECODER in [True, False]:
+            print(f"\n{'=' * 80}\nRUNNING EXPERIMENT WITH USE_MU={USE_MU}, USE_DEEPONET_DECODER={USE_DEEPONET_DECODER}\n{'=' * 80}")
+            run_experiment(USE_MU=USE_MU, USE_DEEPONET_DECODER=USE_DEEPONET_DECODER)
 
 if __name__ == "__main__":
     main()

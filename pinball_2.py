@@ -354,11 +354,11 @@ def plot_with_colorbar(y, Yh, ax=None, cmap="jet", vmin=None, vmax=None, label=N
     cbar.set_label(label, size=16)
     return mappable
 
-def run_experiment(USE_MU):
+def run_experiment(USE_MU, USE_DEEPONET_DECODER=False):
     
     script_dir = Path(__file__).resolve().parent
-    logs_dir = script_dir / f"logs_pinball_{'mu' if USE_MU else 'no_mu'}_new_5sens"
-    checkpoints_dir = script_dir / f"checkpoints_pinball_{'mu' if USE_MU else 'no_mu'}_new_5sens"
+    logs_dir = script_dir / f"logs_pinball_{'dndec' if USE_DEEPONET_DECODER else 'no_dndec'}_{'mu' if USE_MU else 'no_mu'}_new_5sens"
+    checkpoints_dir = script_dir / f"checkpoints_pinball_{'dndec' if USE_DEEPONET_DECODER else 'no_dndec'}_{'mu' if USE_MU else 'no_mu'}_new_5sens"
     logs_dir.mkdir(parents=True, exist_ok=True)
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     
@@ -543,7 +543,7 @@ def run_experiment(USE_MU):
                         mesh_coords=mesh_coordinates_norm,
                         fixed_sensor_locations=fixed_sens,
                         use_all_sensors=True,
-                        drop_random_sensors_options=[0])
+                        drop_random_sensors_options=[0, 1])
     )
 
     val_loader = DataLoader(
@@ -556,7 +556,7 @@ def run_experiment(USE_MU):
                         mesh_coords=mesh_coordinates_norm,
                         fixed_sensor_locations=fixed_sens,
                         use_all_sensors=True,
-                        drop_random_sensors_options=[0])
+                        drop_random_sensors_options=[0, 1])
     )
 
     print(f"Number of training batches: {len(train_loader)}")
@@ -602,7 +602,7 @@ def run_experiment(USE_MU):
         fourier_scale = 1.0, #scale of the fourier features for the spatial coordinates (x,y)
         learnable_fourier = True, #whether to learn the fourier features for the spatial coordinates (x,y)
         use_skip = True, #whether to use skip connections in the decoder
-        use_deeponet_decoder = True, #whether to use a DeepONet-style decoder
+        use_deeponet_decoder = USE_DEEPONET_DECODER, #whether to use a DeepONet-style decoder
     ).to(device)
     
         
@@ -706,7 +706,7 @@ def run_experiment(USE_MU):
         gradient_clip=1.0,  # Gradient clipping for stability
         early_stopping_patience=1000,
         is_meta_learning=True,  # Enable Neural Process mode
-        verbose=True,
+        verbose=False,
         print_every=10,  # Print every 10 epochs
         checkpoint_dir=str(checkpoints_dir),  # Directory to save checkpoints
         beta_schedule=beta_schedule,
@@ -1384,8 +1384,9 @@ def run_experiment(USE_MU):
 
 def main():
     for USE_MU in [True, False]:
-        print(f"\n{'=' * 80}\nRUNNING EXPERIMENT WITH USE_MU={USE_MU}\n{'=' * 80}")
-        run_experiment(USE_MU)
+        for USE_DEEPONET_DECODER in [True, False]:
+            print(f"\n{'=' * 80}\nRUNNING EXPERIMENT WITH USE_MU={USE_MU}, USE_DEEPONET_DECODER={USE_DEEPONET_DECODER}\n{'=' * 80}")
+            run_experiment(USE_MU=USE_MU, USE_DEEPONET_DECODER=USE_DEEPONET_DECODER)
 
 if __name__ == "__main__":
     main()
