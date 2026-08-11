@@ -751,7 +751,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONE
     print("PHASE 2: STOCHASTIC FINE-TUNING (4500 Epochs)")
     print("=" * 60)
     
-    epochs_p2 = 4500
+    epochs_p2 = 2500
     ramp_epochs = 1000
     
     # Note: I strongly recommend 0.1 instead of 1.0 to prevent the collapse you saw earlier.

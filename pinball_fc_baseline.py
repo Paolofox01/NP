@@ -526,6 +526,7 @@ def run_experiment(USE_MU):
     history_window = trajectories_test[:, time_idx - history_length + 1 : time_idx + 1, fixed_sens].to(device)
     
     offsets = torch.arange(-history_length + 1, 1, dtype=torch.float32).to(device)
+
     t_col = (offsets / float(ntimes)).unsqueeze(0).unsqueeze(-1).expand(batch_size, history_length, 1)
     
     # --- CHANGED: sensor_history strictly contains (sensors + time) ---
