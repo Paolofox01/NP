@@ -731,7 +731,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONE
         gradient_clip=1.0,
         early_stopping_patience=1000, # Disable early stopping during warmup
         is_meta_learning=True,
-        verbose=False,
+        verbose=True,
         print_every=10,
         checkpoint_dir=str(p1_checkpoints_dir),
         beta_schedule=beta_schedule_p1,
@@ -791,7 +791,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONE
         gradient_clip=1.0,
         early_stopping_patience=1000, 
         is_meta_learning=True,
-        verbose=False,
+        verbose=True,
         print_every=10,
         checkpoint_dir=str(p2_checkpoints_dir),
         beta_schedule=beta_schedule_p2,
