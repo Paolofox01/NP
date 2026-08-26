@@ -42,8 +42,7 @@ if IS_KAGGLE:
         # Data & Assets
         "mesh": BASE_DATA_DIR / "Pinball_mesh.xml",
         "data": BASE_DATA_DIR / "Pinball_data.npz",
-        "shred": BASE_DATA_DIR / "Pinball_idx_fixedsensors.pt",
-        "gp": BASE_DATA_DIR / "sensor_history_gp.pth",
+        "fixed_sensors": BASE_DATA_DIR / "Pinball_idx_fixedsensors.pt",
 
         # Model Checkpoints (Adjust keys to match your models)
         "anp_mu": KAGGLE_NB2 / "checkpoints_pinball_no_dndec_mu_new_5sens/best_model.pt",
@@ -54,7 +53,8 @@ if IS_KAGGLE:
         # DeepONet / GP / SHRED checkpoints (update with your Kaggle paths if available)
         "probdeeponet": KAGGLE_NB1 / "checkpoints_pinball_fc_without_mu_lag20/best_model.pt",
         "deeponet": KAGGLE_NB1 / "checkpoints_pinball_fc_deterministic_without_mu_lag_20/best_model.pt",
-        
+        "gp": BASE_DATA_DIR / "sensor_history_gp.pth",
+        "shred": BASE_DATA_DIR / "Pinball_shred_fixedsensors.pt",        
         }
 else:
     SCRIPT_DIR = Path(__file__).resolve().parent
