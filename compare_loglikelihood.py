@@ -625,7 +625,14 @@ def main():
         coord_dim=3, 
         p=128
     ).to(device)
-    model_probdeeponet = load_model_checkpoint(model_probdeeponet, CHECKPOINT_PATHS["probdeeponet"], device)
+    # Dynamic key routing based on USE_MU toggle
+    anp_key = "anp_mu" if (IS_KAGGLE and USE_MU) else ("anp_no_mu" if IS_KAGGLE else "anp")
+    lnp_key = "lnp_mu" if (IS_KAGGLE and USE_MU) else ("lnp_no_mu" if IS_KAGGLE else "lnp")
+    probdon_key = "probdeeponet_mu" if (IS_KAGGLE and USE_MU) else ("probdeeponet_no_mu" if IS_KAGGLE else "probdeeponet")
+    don_key = "deeponet_mu" if (IS_KAGGLE and USE_MU) else ("deeponet_no_mu" if IS_KAGGLE else "deeponet")
+
+    # Load Prob-DeepONet
+    model_probdeeponet = load_model_checkpoint(model_probdeeponet, CHECKPOINT_PATHS[probdon_key], device)
     model_probdeeponet.eval()
 
     # 7. Initialize Deterministic DeepONet
@@ -635,7 +642,8 @@ def main():
         coord_dim=3, 
         p=128
     ).to(device)
-    model_don = load_model_checkpoint(model_don, CHECKPOINT_PATHS["deeponet"], device)
+    # Load Deterministic DeepONet
+    model_don = load_model_checkpoint(model_don, CHECKPOINT_PATHS[don_key], device)
     model_don.eval()
 
     # 8. Initialize Context GP
