@@ -51,8 +51,10 @@ if IS_KAGGLE:
         "lnp_no_mu": KAGGLE_NB1 / "checkpoints_pinball_no_dndec_no_mu_3/phase2/best_model.pt",
         
         # DeepONet / GP / SHRED checkpoints (update with your Kaggle paths if available)
-        "probdeeponet": KAGGLE_NB1 / "checkpoints_pinball_fc_without_mu_lag20/best_model.pt",
-        "deeponet": KAGGLE_NB1 / "checkpoints_pinball_fc_deterministic_without_mu_lag_20/best_model.pt",
+        "probdeeponet_mu": KAGGLE_NB1 / "checkpoints_pinball_fc_baseline_with_mu/best_model.pt",
+        "probdeeponet_no_mu": KAGGLE_NB1 / "checkpoints_pinball_fc_baseline_without_mu/best_model.pt",
+        "deeponet_mu": KAGGLE_NB1 / "checkpoints_pinball_don_det_with_mu/best_model.pt",
+        "deeponet_no_mu": KAGGLE_NB1 / "checkpoints_pinball_don_det_without_mu/best_model.pt",
         "gp": BASE_DATA_DIR / "sensor_history_gp.pth",
         "shred": BASE_DATA_DIR / "Pinball_shred_fixedsensors.pt",        
         }
