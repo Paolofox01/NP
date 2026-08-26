@@ -406,11 +406,6 @@ def run_experiment(USE_MU):
 
     # Normalize Coordinates
     mesh_coords_tensor = torch.tensor(mesh_coordinates, dtype=torch.float32)
-    coord_min = mesh_coords_tensor.min(dim=0, keepdim=True)[0]
-    coord_max = mesh_coords_tensor.max(dim=0, keepdim=True)[0]
-    coord_range = coord_max - coord_min
-    coord_range[coord_range == 0] = 1.0 
-    mesh_coords_tensor = (mesh_coords_tensor - coord_min) / coord_range
 
     # --------------------------------------------------------------------------
     # 3. Setup Training Components

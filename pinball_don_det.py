@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from dolfin import *
 
 # Assuming these are available in your local directory structure
-from architectures.Fourier import FourierFeatures
+from architectures.Fourier import FourierFeatures, LearnableFourierFeatures
 from pinball_paths import resolve_pinball_asset
 from processdata import multiplot, trajectories
 from torch.utils.data import DataLoader, Dataset
@@ -163,58 +163,85 @@ def build_don_eval_inputs(
 # ==============================================================================
 
 class DeepONetDeterministic(nn.Module):
-    def __init__(self, num_sensors=10, num_params=0, history_length=20, coord_dim=3, p=128, num_frequencies=32):
+    def __init__(
+        self,
+        num_sensors=10,
+        num_params=0,
+        history_length=20,
+        coord_dim=3,
+        p=128,
+        num_frequencies=32,
+    ):
         super().__init__()
         self.p = p
         self.num_params = num_params
 
-        # 1. Branch Net — LSTM
+        # 1. Branch Net — LSTM only sees dynamic signals (sensors + relative time)
         self.branch_lstm = nn.LSTM(
-            input_size=num_sensors + 1 + num_params,
+            input_size=num_sensors + 1,
             hidden_size=256,
             num_layers=2,
             batch_first=True,
             dropout=0.1,
         )
-        self.branch_proj = nn.Linear(256, p) # Only predicts p features
-        
-        # 2. Fourier Features (Now matches stochastic: input_dim = coord_dim)
-        self.fourier_mapping = FourierFeatures(
-            input_dim=coord_dim, 
-            num_frequencies=num_frequencies,
-            scale=6.0,
-            learnable=False
+
+        # Branch Head (matching the 2-layer MLP head structure)
+        self.branch_head = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, p),
         )
 
-        # 3. Trunk Net (Dropout removed to match stochastic)
-        trunk_input_dim = coord_dim + (2 * num_frequencies)
-        
-        self.trunk = nn.Sequential(
+        # 2. Fourier Features (Learnable, matching probabilistic model)
+        self.fourier_mapping = LearnableFourierFeatures(
+            input_dim=coord_dim,
+            num_frequencies=num_frequencies,
+            init_scale=1.0,
+        )
+
+        # 3. Trunk Net (Coordinates + Fourier + static parameters mu)
+        trunk_input_dim = coord_dim + (2 * num_frequencies) + num_params
+        self.trunk_base = nn.Sequential(
             nn.Linear(trunk_input_dim, 256),
             nn.ReLU(),
             nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Linear(256, 256),
+        )
+
+        # Trunk Head (matching the 2-layer MLP head structure)
+        self.trunk_head = nn.Sequential(
+            nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(256, p) 
+            nn.Linear(128, p),
         )
 
         self.bias = nn.Parameter(torch.zeros(1))
 
-    def forward(self, sensor_history, coords):
-        _, (h_n, _) = self.branch_lstm(sensor_history)
-        branch_out = self.branch_proj(h_n[-1]).unsqueeze(1)  # (B, 1, p)
-        
-        # Fourier applied to ALL coordinates (time + space)
-        coords_fourier = self.fourier_mapping(coords[: , :, :])
-        trunk_input = torch.cat([coords, coords_fourier], dim=-1)
-        trunk_out = self.trunk(trunk_input) # (B, N_points, p)
-        
-        # Simple dot product for deterministic prediction
-        pred = torch.sum(branch_out * trunk_out, dim=-1) / math.sqrt(self.p) + self.bias
-        
-        return pred
+    def forward(self, sensor_history, static_params, coords):
+        # sensor_history: (B, T, num_sensors + 1)
+        # static_params:  (B, num_params) or None
+        # coords:         (B, N, coord_dim)
 
+        # 1. Branch Processing
+        _, (h_n, _) = self.branch_lstm(sensor_history)
+        branch_features = h_n[-1]
+        branch_out = self.branch_head(branch_features).unsqueeze(1)  # (B, 1, p)
+
+        # 2. Trunk Processing
+        coords_fourier = self.fourier_mapping(coords)
+
+        if static_params is not None:
+            static_params_expanded = static_params.unsqueeze(1).expand(-1, coords.size(1), -1)
+            trunk_input = torch.cat([coords, coords_fourier, static_params_expanded], dim=-1)
+        else:
+            trunk_input = torch.cat([coords, coords_fourier], dim=-1)
+
+        trunk_features = self.trunk_base(trunk_input)
+        trunk_out = self.trunk_head(trunk_features)  # (B, N, p)
+
+        # 3. Dot Product
+        pred = torch.sum(branch_out * trunk_out, dim=-1) / math.sqrt(self.p) + self.bias
+        return pred
 
 # ==============================================================================
 # LOSS & TRAINING UTILS

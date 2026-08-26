@@ -1,20 +1,21 @@
 from __future__ import print_function
 
-from dolfin import *
-import torch
-import torch.nn as nn
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap, BoundaryNorm
-import seaborn as sns
-import sys
 import os
+import sys
+import math
 from pathlib import Path
 from functools import partial
-import math
-import matplotlib.patches as mpatches
+
+import numpy as np
+import torch
+import torch.nn as nn
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.colors import ListedColormap, BoundaryNorm
+import seaborn as sns
 from torch.utils.data import Dataset, DataLoader
+from dolfin import *
 
 # Domain & Model modules
 from processdata import trajectory, trajectories, multiplot
@@ -37,27 +38,25 @@ if IS_KAGGLE:
     
     OUTPUT_LOGS_DIR = Path("/kaggle/working/logs_compare")
     
-    # Define checkpoint paths mapping
     CHECKPOINT_PATHS = {
         # Data & Assets
         "mesh": BASE_DATA_DIR / "Pinball_mesh.xml",
         "data": BASE_DATA_DIR / "Pinball_data.npz",
         "fixed_sensors": BASE_DATA_DIR / "Pinball_idx_fixedsensors.pt",
 
-        # Model Checkpoints (Adjust keys to match your models)
+        # Model Checkpoints
         "anp_mu": KAGGLE_NB2 / "checkpoints_pinball_no_dndec_mu_new_5sens/best_model.pt",
         "anp_no_mu": KAGGLE_NB2 / "checkpoints_pinball_no_dndec_no_mu_new_5sens/best_model.pt",
         "lnp_mu": KAGGLE_NB1 / "checkpoints_pinball_no_dndec_mu_3/phase2/best_model.pt",
         "lnp_no_mu": KAGGLE_NB1 / "checkpoints_pinball_no_dndec_no_mu_3/phase2/best_model.pt",
         
-        # DeepONet / GP / SHRED checkpoints (update with your Kaggle paths if available)
         "probdeeponet_mu": KAGGLE_NB1 / "checkpoints_pinball_fc_baseline_with_mu/best_model.pt",
         "probdeeponet_no_mu": KAGGLE_NB1 / "checkpoints_pinball_fc_baseline_without_mu/best_model.pt",
         "deeponet_mu": KAGGLE_NB1 / "checkpoints_pinball_don_det_with_mu/best_model.pt",
         "deeponet_no_mu": KAGGLE_NB1 / "checkpoints_pinball_don_det_without_mu/best_model.pt",
         "gp": BASE_DATA_DIR / "sensor_history_gp.pth",
         "shred": BASE_DATA_DIR / "Pinball_shred_fixedsensors.pt",        
-        }
+    }
 else:
     SCRIPT_DIR = Path(__file__).resolve().parent
     from pinball_paths import resolve_pinball_asset
@@ -72,8 +71,8 @@ else:
         
         "anp": SCRIPT_DIR / f"checkpoints_pinball_{'mu' if USE_MU else 'no_mu'}_new_5sens/best_model.pt",
         "lnp": SCRIPT_DIR / f"checkpoints_pinball_{'mu' if USE_MU else 'no_mu'}_3/best_model.pt",
-        "probdeeponet": SCRIPT_DIR / f"checkpoints_pinball_fc_{'with_mu' if USE_MU else 'without_mu'}_lag20/best_model.pt",
-        "deeponet": SCRIPT_DIR / f"checkpoints_pinball_fc_deterministic_{'with_mu' if USE_MU else 'without_mu'}_lag_20/best_model.pt",
+        "probdeeponet": SCRIPT_DIR / f"checkpoints_pinball_fc_baseline_{'with_mu' if USE_MU else 'without_mu'}/best_model.pt",
+        "deeponet": SCRIPT_DIR / f"checkpoints_pinball_don_det_{'with_mu' if USE_MU else 'without_mu'}/best_model.pt",
         "gp": SCRIPT_DIR / "checkpoints_pinball_gp_lag_20/sensor_history_gp.pth",
         "shred": SCRIPT_DIR / f"checkpoints_pinball_shred_{'with_mu' if USE_MU else 'without_mu'}_lag_20/best_model.pt",
     }
@@ -176,6 +175,9 @@ def unified_test_collate_fn(
     time_window = torch.arange(time_idx - lag, time_idx + 1)
     history_len = lag + 1
 
+    # ---------------------------------------------------------
+    # NEURAL PROCESS FORMATTING
+    # ---------------------------------------------------------
     if model_format == "np":
         context_time_indices = time_window.repeat_interleave(num_sensors)
         context_state_indices = sensor_locations.repeat(history_len)
@@ -211,6 +213,9 @@ def unified_test_collate_fn(
 
         return x_context.contiguous(), y_context.contiguous(), x_target.contiguous(), y_target.contiguous()
 
+    # ---------------------------------------------------------
+    # DEEPONET FORMATTING (DETERMINISTIC & PROBABILISTIC)
+    # ---------------------------------------------------------
     elif model_format == "don":
         batch_indices_2d = torch.arange(batch_size).unsqueeze(1)
         history_states = batch_trajs[batch_indices_2d, time_window]
@@ -220,19 +225,25 @@ def unified_test_collate_fn(
         t_relative = (offsets.float() / float(ntimes)).unsqueeze(0).unsqueeze(-1)
         t_repeated = t_relative.expand(batch_size, history_len, -1)
         
+        # Branch input: ONLY sensors + relative time (Shape: [B, T, num_sensors + 1])
+        sensor_history = torch.cat([sensor_history_3d, t_repeated], dim=-1)
+
+        # Trunk static parameters: extracted at target time index (Shape: [B, num_params])
         if batch_mus is not None:
             batch_mus = batch_mus.view(batch_size, ntimes, -1)
-            mu_history = batch_mus[batch_indices_2d, time_window]
-            sensor_history = torch.cat([sensor_history_3d, t_repeated, mu_history], dim=-1)
+            static_params = batch_mus[torch.arange(batch_size), time_idx]
         else:
-            sensor_history = torch.cat([sensor_history_3d, t_repeated], dim=-1)
+            static_params = None
 
+        # Trunk coordinates: target time (0.0) + spatial mesh coords
         t_target = torch.zeros((batch_size, nstate, 1), dtype=torch.float32)
         spatial_coords = mesh_coords.unsqueeze(0).expand(batch_size, -1, -1) 
         coords = torch.cat([t_target, spatial_coords], dim=-1)
+        
         y_target = batch_trajs[:, time_idx, :].unsqueeze(-1) 
         
-        return sensor_history.contiguous(), None, coords.contiguous(), y_target.contiguous()
+        # Return format: x_context=sensor_history, y_context=static_params, x_target=coords, y_target
+        return sensor_history.contiguous(), (static_params.contiguous() if static_params is not None else None), coords.contiguous(), y_target.contiguous()
     else:
         raise ValueError("model_format must be 'np' or 'don'")
 
@@ -265,88 +276,165 @@ def plot_with_colorbar(y, Yh, ax=None, cmap="jet", vmin=None, vmax=None, label=N
 # 2. MODEL DEFINITIONS
 # ==============================================================================
 class DeepONetDeterministic(nn.Module):
-    def __init__(self, num_sensors=10, num_params=0, history_length=20, coord_dim=3, p=128, num_frequencies=32):
+    def __init__(
+        self,
+        num_sensors=10,
+        num_params=0,
+        history_length=20,
+        coord_dim=3,
+        p=128,
+        num_frequencies=32,
+    ):
         super().__init__()
         self.p = p
         self.num_params = num_params
+
+        # 1. Branch Net — LSTM on dynamic signals only
         self.branch_lstm = nn.LSTM(
-            input_size=num_sensors + 1 + num_params,
+            input_size=num_sensors + 1,
             hidden_size=256,
             num_layers=2,
             batch_first=True,
             dropout=0.1,
         )
-        self.branch_proj = nn.Linear(256, p)
-        self.fourier_mapping = FourierFeatures(
-            input_dim=coord_dim, 
-            num_frequencies=num_frequencies,
-            scale=6.0,
-            learnable=False
+        self.branch_head = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, p),
         )
-        trunk_input_dim = coord_dim + (2 * num_frequencies)
-        self.trunk = nn.Sequential(
+
+        # 2. Learnable Fourier Features
+        self.fourier_mapping = LearnableFourierFeatures(
+            input_dim=coord_dim,
+            num_frequencies=num_frequencies,
+            init_scale=1.0,
+        )
+
+        # 3. Trunk Net (Coordinates + Fourier + static parameters mu)
+        trunk_input_dim = coord_dim + (2 * num_frequencies) + num_params
+        self.trunk_base = nn.Sequential(
             nn.Linear(trunk_input_dim, 256),
             nn.ReLU(),
             nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, p) 
         )
+        self.trunk_head = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, p),
+        )
+
         self.bias = nn.Parameter(torch.zeros(1))
 
-    def forward(self, sensor_history, coords):
+    def forward(self, sensor_history, static_params, coords):
+        # 1. Branch Processing
         _, (h_n, _) = self.branch_lstm(sensor_history)
-        branch_out = self.branch_proj(h_n[-1]).unsqueeze(1)
-        coords_fourier = self.fourier_mapping(coords[:, :, :])
-        trunk_input = torch.cat([coords, coords_fourier], dim=-1)
-        trunk_out = self.trunk(trunk_input)
+        branch_features = h_n[-1]
+        branch_out = self.branch_head(branch_features).unsqueeze(1)  # (B, 1, p)
+
+        # 2. Trunk Processing
+        coords_fourier = self.fourier_mapping(coords)
+        if static_params is not None:
+            static_params_expanded = static_params.unsqueeze(1).expand(-1, coords.size(1), -1)
+            trunk_input = torch.cat([coords, coords_fourier, static_params_expanded], dim=-1)
+        else:
+            trunk_input = torch.cat([coords, coords_fourier], dim=-1)
+
+        trunk_features = self.trunk_base(trunk_input)
+        trunk_out = self.trunk_head(trunk_features)  # (B, N, p)
+
+        # 3. Dot Product
         pred = torch.sum(branch_out * trunk_out, dim=-1) / math.sqrt(self.p) + self.bias
         return pred
 
+
 class DeepONetMeanVar(nn.Module):
-    def __init__(self, num_sensors=10, num_params=0, history_length=20, coord_dim=3, p=128, num_frequencies=32):
+    def __init__(
+        self,
+        num_sensors=10,
+        num_params=0,
+        history_length=20,
+        coord_dim=3,
+        p=128,
+        num_frequencies=32,
+    ):
         super().__init__()
         self.p = p
         self.num_params = num_params
+
+        # 1. Branch Net
         self.branch_lstm = nn.LSTM(
-            input_size=num_sensors + 1 + num_params,
+            input_size=num_sensors + 1,
             hidden_size=256,
             num_layers=2,
             batch_first=True,
             dropout=0.1,
         )
-        self.branch_proj = nn.Linear(256, p * 2)
-        self.fourier_mapping = LearnableFourierFeatures(
-            input_dim=coord_dim, 
-            num_frequencies=num_frequencies,
-            init_scale=1.0
+        self.branch_mean_head = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, p),
         )
-        trunk_input_dim = coord_dim + (2 * num_frequencies)
-        self.trunk = nn.Sequential(
+        self.branch_var_head = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, p),
+        )
+
+        # 2. Learnable Fourier Features
+        self.fourier_mapping = LearnableFourierFeatures(
+            input_dim=coord_dim,
+            num_frequencies=num_frequencies,
+            init_scale=1.0,
+        )
+
+        # 3. Trunk Net
+        trunk_input_dim = coord_dim + (2 * num_frequencies) + num_params
+        self.trunk_base = nn.Sequential(
             nn.Linear(trunk_input_dim, 256),
             nn.ReLU(),
             nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, p * 2) 
         )
+        self.trunk_mean_head = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, p),
+        )
+        self.trunk_var_head = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, p),
+        )
+
         self.mean_bias = nn.Parameter(torch.zeros(1))
         self.var_bias = nn.Parameter(torch.tensor([-3.0]))
 
-    def forward(self, sensor_history, coords):
+    def forward(self, sensor_history, static_params, coords):
+        # 1. Branch Processing
         _, (h_n, _) = self.branch_lstm(sensor_history)
-        branch_out = self.branch_proj(h_n[-1]).unsqueeze(1)
-        coords_fourier = self.fourier_mapping(coords[:, :, :])
-        trunk_input = torch.cat([coords, coords_fourier], dim=-1)
-        trunk_out = self.trunk(trunk_input)
-        branch_mean, branch_var = torch.split(branch_out, self.p, dim=-1)
-        trunk_mean, trunk_var = torch.split(trunk_out, self.p, dim=-1)
+        branch_features = h_n[-1]
+        branch_mean = self.branch_mean_head(branch_features).unsqueeze(1)  # (B, 1, p)
+        branch_var = self.branch_var_head(branch_features).unsqueeze(1)    # (B, 1, p)
+
+        # 2. Trunk Processing
+        coords_fourier = self.fourier_mapping(coords)
+        if static_params is not None:
+            static_params_expanded = static_params.unsqueeze(1).expand(-1, coords.size(1), -1)
+            trunk_input = torch.cat([coords, coords_fourier, static_params_expanded], dim=-1)
+        else:
+            trunk_input = torch.cat([coords, coords_fourier], dim=-1)
+
+        trunk_features = self.trunk_base(trunk_input)
+        trunk_mean = self.trunk_mean_head(trunk_features)  # (B, N, p)
+        trunk_var = self.trunk_var_head(trunk_features)    # (B, N, p)
+
+        # 3. Dot Products
         mean = torch.sum(branch_mean * trunk_mean, dim=-1) / math.sqrt(self.p) + self.mean_bias
         var_raw = torch.sum(branch_var * trunk_var, dim=-1) / math.sqrt(self.p) + self.var_bias
         var = F.softplus(var_raw) + 1e-6
         return mean, var
+
 
 class ContextConditionedGP(gpytorch.models.ExactGP):
     def __init__(self, train_x, train_y, likelihood):
@@ -379,7 +467,7 @@ METHOD_STYLES = {
     "Prob-DeepONet": {"color": "#2A9D8F", "linestyle": "-.", "linewidth": 2.2, "alpha": 0.85},
     "SHRED": {"color": "#8338EC", "linestyle": ":", "linewidth": 2.2, "alpha": 0.85},
     "Context-GP": {"color": "#F4A261", "linestyle": "-", "linewidth": 2.2, "alpha": 0.85},
-    "DeepONet": {"color": "#457B9D", "linestyle": "-", "linewidth": 2.2, "alpha": 0.85}
+    "DeepONet": {"color": "#E9C46A", "linestyle": ":", "linewidth": 2.2, "alpha": 0.85}
 }
 
 def _plot_row(ax_hist, ax_box, data_dict, title, xlabel, bins, clip_pct, log_scale=False):
@@ -478,7 +566,8 @@ def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coord
                 y_true = y_t.squeeze(-1).squeeze(0).cpu()
                 final_ll = torch.logsumexp(gaussian_log_lik(mc_means.squeeze(1), mc_vars.squeeze(1), y_true.unsqueeze(0)), dim=0) - math.log(mc_samples)
             else:
-                outputs = model(x_c, x_t) if y_c is None else model(x_c, y_c, x_t)
+                # DeepONet (Deterministic & Probabilistic) - forward takes (sensor_history, static_params, coords)
+                outputs = model(x_c, y_c, x_t)
                 if isinstance(outputs, tuple):
                     pred_mean, pred_var = outputs[0], outputs[1]
                 else:
@@ -508,17 +597,17 @@ def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coord
 # 4. MAIN EXECUTION
 # ============================================================
 def main():
-    USE_MU = False  # Toggle whether to use mu conditioning
+    USE_MU = False  # Impostare su True se si vogliono valutare i modelli addestrati con mu
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Running on: {device} | Kaggle Environment: {IS_KAGGLE}")
 
-    # Create all log subdirectories in output location
+    # Creazione cartelle di output
     logs_dir = OUTPUT_LOGS_DIR
     logs_dir.mkdir(parents=True, exist_ok=True)
     for sub in ["logs_anp", "logs_lnp", "logs_deeponet", "logs_shred", "logs_gp", "logs_probdeeponet"]:
         (logs_dir / sub).mkdir(parents=True, exist_ok=True)
 
-    # 1. Load Mesh
+    # 1. Caricamento Mesh
     print("Loading FEniCS Mesh...")
     mesh = Mesh(str(CHECKPOINT_PATHS["mesh"]))
     Yh = FunctionSpace(mesh, "CG", 1)
@@ -526,9 +615,10 @@ def main():
     mesh_coordinates = torch.as_tensor(Yh.tabulate_dof_coordinates(), dtype=torch.float32)
     mesh_coordinates_norm = mesh_coordinates
 
-    # 2. Load Sensors & Data
-    if CHECKPOINT_PATHS["fixed_sensors"].exists():
-        fixed_sens = torch.load(str(CHECKPOINT_PATHS["fixed_sensors"]), weights_only=False)
+    # 2. Caricamento Sensori e Dati
+    fixed_sensors_path = CHECKPOINT_PATHS.get("fixed_sensors", None)
+    if fixed_sensors_path is not None and Path(fixed_sensors_path).exists():
+        fixed_sens = torch.load(str(fixed_sensors_path), weights_only=False)
         if isinstance(fixed_sens, torch.Tensor):
             fixed_sens = fixed_sens.tolist()
     else:
@@ -559,7 +649,7 @@ def main():
     MUtest = MU[idx_test]
     test_dataset = SpatiotemporalDataset(Ytest, MUtest if USE_MU else None)
 
-    # 3. Model Hyperparameters
+    # 3. Iperparametri Modelli
     x_dim = 6 if USE_MU else 3
     y_dim = 1
     r_dim = 128
@@ -567,11 +657,13 @@ def main():
     hidden_dim = 128
     n_hidden = 2
 
-    # Choose correct checkpoint key depending on USE_MU flag
+    # Risoluzione chiavi checkpoint
     anp_key = "anp_mu" if (IS_KAGGLE and USE_MU) else ("anp_no_mu" if IS_KAGGLE else "anp")
     lnp_key = "lnp_mu" if (IS_KAGGLE and USE_MU) else ("lnp_no_mu" if IS_KAGGLE else "lnp")
+    probdon_key = "probdeeponet_mu" if (IS_KAGGLE and USE_MU) else ("probdeeponet_no_mu" if IS_KAGGLE else "probdeeponet")
+    don_key = "deeponet_mu" if (IS_KAGGLE and USE_MU) else ("deeponet_no_mu" if IS_KAGGLE else "deeponet")
 
-    # 4. Initialize ANP (Matching checkpoints with `no_dndec`)
+    # 4. Inizializzazione ANP
     print("Initializing ANP...")
     model_anp = LatNP(
         x_dim=x_dim,
@@ -590,12 +682,12 @@ def main():
         fourier_scale=1.0,
         learnable_fourier=True,
         use_skip=True,
-        use_deeponet_decoder=False, # Set to False for 'no_dndec' checkpoints
+        use_deeponet_decoder=False,
     ).to(device)
     model_anp = load_model_checkpoint(model_anp, CHECKPOINT_PATHS[anp_key], device)
     model_anp.eval()
 
-    # 5. Initialize LatNP
+    # 5. Inizializzazione LatNP
     print("Initializing LNP...")
     model_lnp = LatNP_simple(
         x_dim=x_dim,
@@ -612,41 +704,37 @@ def main():
         num_frequencies=32,
         fourier_scale=1.0,
         learnable_fourier=True,
-        use_deeponet_decoder=False, # Set to False for 'no_dndec' checkpoints
+        use_deeponet_decoder=False,
         p=128,
     ).to(device)
     model_lnp = load_model_checkpoint(model_lnp, CHECKPOINT_PATHS[lnp_key], device)
     model_lnp.eval()
 
-    # 6. Initialize Probabilistic DeepONet
+    # 6. Inizializzazione Probabilistic DeepONet
+    print("Initializing Prob-DeepONet...")
     model_probdeeponet = DeepONetMeanVar(
         num_sensors=len(fixed_sens), 
         num_params=3 if USE_MU else 0,
         coord_dim=3, 
-        p=128
+        p=128,
+        num_frequencies=32
     ).to(device)
-    # Dynamic key routing based on USE_MU toggle
-    anp_key = "anp_mu" if (IS_KAGGLE and USE_MU) else ("anp_no_mu" if IS_KAGGLE else "anp")
-    lnp_key = "lnp_mu" if (IS_KAGGLE and USE_MU) else ("lnp_no_mu" if IS_KAGGLE else "lnp")
-    probdon_key = "probdeeponet_mu" if (IS_KAGGLE and USE_MU) else ("probdeeponet_no_mu" if IS_KAGGLE else "probdeeponet")
-    don_key = "deeponet_mu" if (IS_KAGGLE and USE_MU) else ("deeponet_no_mu" if IS_KAGGLE else "deeponet")
-
-    # Load Prob-DeepONet
     model_probdeeponet = load_model_checkpoint(model_probdeeponet, CHECKPOINT_PATHS[probdon_key], device)
     model_probdeeponet.eval()
 
-    # 7. Initialize Deterministic DeepONet
+    # 7. Inizializzazione Deterministic DeepONet
+    print("Initializing DeepONet Deterministic...")
     model_don = DeepONetDeterministic(
         num_sensors=len(fixed_sens), 
         num_params=3 if USE_MU else 0,
         coord_dim=3, 
-        p=128
+        p=128,
+        num_frequencies=32
     ).to(device)
-    # Load Deterministic DeepONet
     model_don = load_model_checkpoint(model_don, CHECKPOINT_PATHS[don_key], device)
     model_don.eval()
 
-    # 8. Initialize Context GP
+    # 8. Inizializzazione Context GP
     likelihood_gp = gpytorch.likelihoods.GaussianLikelihood().to(device)
     dummy_x = torch.zeros(2, 6).to(device)
     dummy_y = torch.zeros(2).to(device)
@@ -660,16 +748,17 @@ def main():
     likelihood_gp.eval()
 
     # ==============================================================================
-    # 9. RUN COMPARISON BENCHMARK (All Models, Lag 19)
+    # 9. CONFRONTO DIRETTO DEI MODELLI (All Sensors, Lag 19)
     # ==============================================================================
     print("\n" + "="*60)
-    print("RUNNING DIRECT COMPARISON ON KAGGLE (Lag 19)")
+    print("RUNNING DIRECT COMPARISON (Lag 19)")
     print("="*60)
 
     ll_dict_cmp, se_dict_cmp, sse_dict_cmp, mse_dict_cmp = {}, {}, {}, {}
     max_lag = 19
 
     # 1. ANP
+    print("  Evaluating ANP...")
     ll, se, sse, mse = evaluate_scenario(
         model=model_anp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
@@ -678,6 +767,7 @@ def main():
     ll_dict_cmp["ANP"], se_dict_cmp["ANP"], sse_dict_cmp["ANP"], mse_dict_cmp["ANP"] = ll, se, sse, mse
 
     # 2. LNP
+    print("  Evaluating LNP...")
     ll, se, sse, mse = evaluate_scenario(
         model=model_lnp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
@@ -686,6 +776,7 @@ def main():
     ll_dict_cmp["LNP"], se_dict_cmp["LNP"], sse_dict_cmp["LNP"], mse_dict_cmp["LNP"] = ll, se, sse, mse
 
     # 3. Prob-DeepONet
+    print("  Evaluating Prob-DeepONet...")
     ll, se, sse, mse = evaluate_scenario(
         model=model_probdeeponet, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
@@ -694,6 +785,7 @@ def main():
     ll_dict_cmp["Prob-DeepONet"], se_dict_cmp["Prob-DeepONet"], sse_dict_cmp["Prob-DeepONet"], mse_dict_cmp["Prob-DeepONet"] = ll, se, sse, mse
 
     # 4. DeepONet (Deterministic)
+    print("  Evaluating DeepONet (Deterministic)...")
     ll, se, sse, mse = evaluate_scenario(
         model=model_don, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
@@ -702,6 +794,7 @@ def main():
     se_dict_cmp["DeepONet"], mse_dict_cmp["DeepONet"] = se, mse
 
     # 5. Context-Conditioned GP
+    print("  Evaluating Context-GP...")
     ll, se, sse, mse = evaluate_scenario(
         model=model_gp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
@@ -713,7 +806,7 @@ def main():
     sse_dict_cmp["Context-GP"] = sse
     mse_dict_cmp["Context-GP"] = mse
 
-    # Generate Final Plot
+    # Generazione grafico finale
     cmp_out_path = logs_dir / "diagnostics_comparison_all_sensors_lag19.png"
     plot_all_distributions(ll_dict_cmp, se_dict_cmp, sse_dict_cmp, mse_dict_cmp, out_path=cmp_out_path)
     print(f"\nSaved final comparison plot to: {cmp_out_path}")
