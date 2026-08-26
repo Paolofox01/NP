@@ -1,4 +1,3 @@
-
 from __future__ import print_function
 
 from dolfin import *
@@ -9,49 +8,95 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 import seaborn as sns
 import sys
-from IPython.display import clear_output as clc
+import os
 from pathlib import Path
-from processdata import trajectory, trajectories, multiplot
-from torch.utils.data import Dataset, DataLoader
 from functools import partial
+import math
+import matplotlib.patches as mpatches
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+
+# Domain & Model modules
+from processdata import trajectory, trajectories, multiplot
 from LNP.LatentNP import LatNP
 from LNP.LATNPsimple import LatNP_simple
 from architectures.Fourier import FourierFeatures, LearnableFourierFeatures
 from LNP.loss_np import ELBOLossNP
 from LNP.training import train_np
-import math
-import matplotlib.patches as mpatches
-import torch.nn.functional as F
-
-from pinball_paths import resolve_pinball_asset
-
+import gpytorch
 
 # ============================================================
-# 1. CONFIGURATION & DATA LOADING
+# 0. KAGGLE PATH CONFIGURATION
 # ============================================================
-def load_data(script_dir):
-    """Loads the main datasets, trajectory parameters, and sensors."""
-    print("Loading data...")
-    filename = resolve_pinball_asset(script_dir, "Pinball_data.npz")
+IS_KAGGLE = os.path.exists("/kaggle/input")
 
-    Data = np.load(str(filename))
-    Y = torch.tensor(Data["y"])
-    MU = torch.tensor(Data["mu"])
-    VNS = torch.tensor(Data["v"])
+if IS_KAGGLE:
+    BASE_DATA_DIR = Path("/kaggle/input/datasets/filippovolpicelli/pinball-data")
+    KAGGLE_NB1 = Path("/kaggle/input/notebooks/filippovolpicelli/pinball-nb/NP")
+    KAGGLE_NB2 = Path("/kaggle/input/notebooks/filippovolpicelli/notebookae593e1af4/NP")
     
-    # Load fixed sensors
-    idx_sensors_path = resolve_pinball_asset(script_dir, "Pinball_idx_fixedsensors.pt")
-    if idx_sensors_path.exists():
-        fixed_sens = torch.load(str(idx_sensors_path), weights_only=False)
-    else:
-        fixed_sens = None
+    OUTPUT_LOGS_DIR = Path("/kaggle/working/logs_compare")
+    
+    # Define checkpoint paths mapping
+    CHECKPOINT_PATHS = {
+        # Data & Assets
+        "mesh": BASE_DATA_DIR / "Pinball_mesh.xml",
+        "data": BASE_DATA_DIR / "Pinball_data.npz",
+        "shred": BASE_DATA_DIR / "Pinball_idx_fixedsensors.pt",
+        "gp": BASE_DATA_DIR / "sensor_history_gp.pth",
+
+        # Model Checkpoints (Adjust keys to match your models)
+        "anp_mu": KAGGLE_NB2 / "checkpoints_pinball_no_dndec_mu_new_5sens/best_model.pt",
+        "anp_no_mu": KAGGLE_NB2 / "checkpoints_pinball_no_dndec_no_mu_new_5sens/best_model.pt",
+        "lnp_mu": KAGGLE_NB1 / "checkpoints_pinball_no_dndec_mu_3/phase2/best_model.pt",
+        "lnp_no_mu": KAGGLE_NB1 / "checkpoints_pinball_no_dndec_no_mu_3/phase2/best_model.pt",
         
-    return Y, MU, VNS, fixed_sens
+        # DeepONet / GP / SHRED checkpoints (update with your Kaggle paths if available)
+        "probdeeponet": KAGGLE_NB1 / "checkpoints_pinball_fc_without_mu_lag20/best_model.pt",
+        "deeponet": KAGGLE_NB1 / "checkpoints_pinball_fc_deterministic_without_mu_lag_20/best_model.pt",
+        
+        }
+else:
+    SCRIPT_DIR = Path(__file__).resolve().parent
+    from pinball_paths import resolve_pinball_asset
+    
+    OUTPUT_LOGS_DIR = SCRIPT_DIR / "logs_compare"
+    USE_MU = False
+    
+    CHECKPOINT_PATHS = {
+        "mesh": resolve_pinball_asset(SCRIPT_DIR, "Pinball_mesh.xml"),
+        "data": resolve_pinball_asset(SCRIPT_DIR, "Pinball_data.npz"),
+        "fixed_sensors": resolve_pinball_asset(SCRIPT_DIR, "Pinball_idx_fixedsensors.pt"),
+        
+        "anp": SCRIPT_DIR / f"checkpoints_pinball_{'mu' if USE_MU else 'no_mu'}_new_5sens/best_model.pt",
+        "lnp": SCRIPT_DIR / f"checkpoints_pinball_{'mu' if USE_MU else 'no_mu'}_3/best_model.pt",
+        "probdeeponet": SCRIPT_DIR / f"checkpoints_pinball_fc_{'with_mu' if USE_MU else 'without_mu'}_lag20/best_model.pt",
+        "deeponet": SCRIPT_DIR / f"checkpoints_pinball_fc_deterministic_{'with_mu' if USE_MU else 'without_mu'}_lag_20/best_model.pt",
+        "gp": SCRIPT_DIR / "checkpoints_pinball_gp_lag_20/sensor_history_gp.pth",
+        "shred": SCRIPT_DIR / f"checkpoints_pinball_shred_{'with_mu' if USE_MU else 'without_mu'}_lag_20/best_model.pt",
+    }
+
+
+def load_model_checkpoint(model, path, device):
+    """Safely loads model weights handling checkpoint dict wrappers."""
+    path = Path(path)
+    if not path.exists():
+        print(f"[!] WARNING: Checkpoint not found at: {path}. Using random weights.")
+        return model
+    print(f"Loading checkpoint from: {path}")
+    checkpoint = torch.load(str(path), map_location=device)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["model_state_dict"])
+    elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        model.load_state_dict(checkpoint["state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
+    return model
+
 
 # ============================================================
-# 1. HELPERS & COLLATERS (From your pinball_2.py)
+# 1. HELPERS & COLLATERS
 # ============================================================
-
 def select_sensor_locations(fixed_sensor_locations, nstate, use_all_sensors=False, drop_random_sensors=0):
     if drop_random_sensors < 0:
         raise ValueError("drop_random_sensors must be >= 0")
@@ -94,16 +139,13 @@ def unified_test_collate_fn(
     time_idx=None, 
     lag=None,
     use_mu=False,
-    model_format="np"  # <--- Use "np" or "don"
+    model_format="np"
 ):
-    """Unified test collater for Neural Processes and DeepONets."""
     if mesh_coords is None: raise ValueError("mesh_coords must be provided!")
     if not isinstance(mesh_coords, torch.Tensor): mesh_coords = torch.as_tensor(mesh_coords, dtype=torch.float32)
 
     batch_size = len(batch)
-    device = batch[0][0].device if isinstance(batch[0], (tuple, list)) else batch[0].device
     
-    # 1. Extract Batch Elements
     if isinstance(batch[0], (tuple, list)):
         ntimes, nstate = batch[0][0].shape
         batch_trajs = torch.stack([item[0] for item in batch])
@@ -114,7 +156,6 @@ def unified_test_collate_fn(
         batch_mus = None
         if use_mu: raise ValueError("use_mu is True, but dataset did not return MU.")
 
-    # 2. Select Sensors
     chosen_drop = choose_drop_random_sensors(drop_random_sensors, drop_random_sensors_options)
     sensor_locations_fixed = select_sensor_locations(
         fixed_sensor_locations, nstate, use_all_sensors=use_all_sensors, drop_random_sensors=chosen_drop
@@ -127,16 +168,12 @@ def unified_test_collate_fn(
         num_sensors = np.random.randint(num_context_sensors_min, num_context_sensors_max + 1)
         sensor_locations = torch.randperm(nstate)[:num_sensors]
 
-    # 3. Select Time Window (Lag serves as history_length for DON)
     if time_idx is None: time_idx = np.random.randint(20, ntimes - 1) 
     if lag is None: lag = np.random.choice([0, 4, 9, 19]) 
 
     time_window = torch.arange(time_idx - lag, time_idx + 1)
     history_len = lag + 1
 
-    # =========================================================
-    # A. NEURAL PROCESS FORMATTING
-    # =========================================================
     if model_format == "np":
         context_time_indices = time_window.repeat_interleave(num_sensors)
         context_state_indices = sensor_locations.repeat(history_len)
@@ -172,17 +209,11 @@ def unified_test_collate_fn(
 
         return x_context.contiguous(), y_context.contiguous(), x_target.contiguous(), y_target.contiguous()
 
-    # =========================================================
-    # B. DEEPONET FORMATTING
-    # =========================================================
     elif model_format == "don":
         batch_indices_2d = torch.arange(batch_size).unsqueeze(1)
         history_states = batch_trajs[batch_indices_2d, time_window]
-        
-        # Branch Input: (Batch, History_Len, Num_Sensors)
         sensor_history_3d = history_states[:, :, sensor_locations]
 
-        # Normalized Relative Time Shift
         offsets = torch.arange(-lag, 1)
         t_relative = (offsets.float() / float(ntimes)).unsqueeze(0).unsqueeze(-1)
         t_repeated = t_relative.expand(batch_size, history_len, -1)
@@ -194,29 +225,19 @@ def unified_test_collate_fn(
         else:
             sensor_history = torch.cat([sensor_history_3d, t_repeated], dim=-1)
 
-        # Trunk Input: Target time (0.0) + spatial coords
         t_target = torch.zeros((batch_size, nstate, 1), dtype=torch.float32)
         spatial_coords = mesh_coords.unsqueeze(0).expand(batch_size, -1, -1) 
         coords = torch.cat([t_target, spatial_coords], dim=-1)
-
-        # DeepONet Target is typically shaped (B, Nstate, 1) to match NP layout safely
         y_target = batch_trajs[:, time_idx, :].unsqueeze(-1) 
         
-        # We return `None` for y_context since DON doesn't use it, 
-        # keeping the 4-item return signature consistent!
         return sensor_history.contiguous(), None, coords.contiguous(), y_target.contiguous()
-
     else:
         raise ValueError("model_format must be 'np' or 'don'")
-    
-    
+
 class SpatiotemporalDataset(Dataset):
     def __init__(self, data, mu_params=None):
         self.data = torch.from_numpy(data).float() if isinstance(data, np.ndarray) else data.float()
-        if mu_params is not None:
-            self.mu_params = torch.from_numpy(mu_params).float() if isinstance(mu_params, np.ndarray) else mu_params.float()
-        else:
-            self.mu_params = None
+        self.mu_params = torch.from_numpy(mu_params).float() if isinstance(mu_params, np.ndarray) else (mu_params.float() if mu_params is not None else None)
 
     def __len__(self): return len(self.data)
     def __getitem__(self, idx):
@@ -238,17 +259,14 @@ def plot_with_colorbar(y, Yh, ax=None, cmap="jet", vmin=None, vmax=None, label=N
     cbar.set_label(label, size=16)
     return mappable
 
-
 # ==============================================================================
-# MODEL DEFINITION
+# 2. MODEL DEFINITIONS
 # ==============================================================================
 class DeepONetDeterministic(nn.Module):
     def __init__(self, num_sensors=10, num_params=0, history_length=20, coord_dim=3, p=128, num_frequencies=32):
         super().__init__()
         self.p = p
         self.num_params = num_params
-
-        # 1. Branch Net — LSTM
         self.branch_lstm = nn.LSTM(
             input_size=num_sensors + 1 + num_params,
             hidden_size=256,
@@ -256,19 +274,14 @@ class DeepONetDeterministic(nn.Module):
             batch_first=True,
             dropout=0.1,
         )
-        self.branch_proj = nn.Linear(256, p) # Only predicts p features
-        
-        # 2. Fourier Features (Now matches stochastic: input_dim = coord_dim)
+        self.branch_proj = nn.Linear(256, p)
         self.fourier_mapping = FourierFeatures(
             input_dim=coord_dim, 
             num_frequencies=num_frequencies,
             scale=6.0,
             learnable=False
         )
-
-        # 3. Trunk Net (Dropout removed to match stochastic)
         trunk_input_dim = coord_dim + (2 * num_frequencies)
-        
         self.trunk = nn.Sequential(
             nn.Linear(trunk_input_dim, 256),
             nn.ReLU(),
@@ -278,33 +291,22 @@ class DeepONetDeterministic(nn.Module):
             nn.ReLU(),
             nn.Linear(256, p) 
         )
-
         self.bias = nn.Parameter(torch.zeros(1))
 
     def forward(self, sensor_history, coords):
         _, (h_n, _) = self.branch_lstm(sensor_history)
-        branch_out = self.branch_proj(h_n[-1]).unsqueeze(1)  # (B, 1, p)
-        
-        # Fourier applied to ALL coordinates (time + space)
-        coords_fourier = self.fourier_mapping(coords[: , :, :])
+        branch_out = self.branch_proj(h_n[-1]).unsqueeze(1)
+        coords_fourier = self.fourier_mapping(coords[:, :, :])
         trunk_input = torch.cat([coords, coords_fourier], dim=-1)
-        trunk_out = self.trunk(trunk_input) # (B, N_points, p)
-        
-        # Simple dot product for deterministic prediction
+        trunk_out = self.trunk(trunk_input)
         pred = torch.sum(branch_out * trunk_out, dim=-1) / math.sqrt(self.p) + self.bias
-        
         return pred
-
-
 
 class DeepONetMeanVar(nn.Module):
     def __init__(self, num_sensors=10, num_params=0, history_length=20, coord_dim=3, p=128, num_frequencies=32):
         super().__init__()
         self.p = p
         self.num_params = num_params
-
-        # 1. Branch Net — LSTM
-        # Input: Sensors + 1 (Time) + Params
         self.branch_lstm = nn.LSTM(
             input_size=num_sensors + 1 + num_params,
             hidden_size=256,
@@ -313,17 +315,12 @@ class DeepONetMeanVar(nn.Module):
             dropout=0.1,
         )
         self.branch_proj = nn.Linear(256, p * 2)
-        
-        # 2. Fourier Features
         self.fourier_mapping = LearnableFourierFeatures(
             input_dim=coord_dim, 
             num_frequencies=num_frequencies,
             init_scale=1.0
         )
-
-        # 3. Trunk Net
         trunk_input_dim = coord_dim + (2 * num_frequencies)
-        
         self.trunk = nn.Sequential(
             nn.Linear(trunk_input_dim, 256),
             nn.ReLU(),
@@ -333,38 +330,26 @@ class DeepONetMeanVar(nn.Module):
             nn.ReLU(),
             nn.Linear(256, p * 2) 
         )
-
         self.mean_bias = nn.Parameter(torch.zeros(1))
         self.var_bias = nn.Parameter(torch.tensor([-3.0]))
 
     def forward(self, sensor_history, coords):
         _, (h_n, _) = self.branch_lstm(sensor_history)
-        branch_out = self.branch_proj(h_n[-1]).unsqueeze(1)  # (B, 1, p*2)
-        
-        coords_fourier = self.fourier_mapping(coords[: , :, :])
+        branch_out = self.branch_proj(h_n[-1]).unsqueeze(1)
+        coords_fourier = self.fourier_mapping(coords[:, :, :])
         trunk_input = torch.cat([coords, coords_fourier], dim=-1)
         trunk_out = self.trunk(trunk_input)
-        
         branch_mean, branch_var = torch.split(branch_out, self.p, dim=-1)
         trunk_mean, trunk_var = torch.split(trunk_out, self.p, dim=-1)
-        
         mean = torch.sum(branch_mean * trunk_mean, dim=-1) / math.sqrt(self.p) + self.mean_bias
-        
         var_raw = torch.sum(branch_var * trunk_var, dim=-1) / math.sqrt(self.p) + self.var_bias
         var = F.softplus(var_raw) + 1e-6
-        
         return mean, var
-    
-import gpytorch
 
-# ==============================================================================
-# GP MODEL DEFINITION
-# ==============================================================================
 class ContextConditionedGP(gpytorch.models.ExactGP):
     def __init__(self, train_x, train_y, likelihood):
         super().__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMean()
-        # 6 input dimensions: [mu_0, mu_1, mu_2, time, x, y]
         self.covar_module = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.MaternKernel(nu=2.5, ard_num_dims=6)
         )
@@ -375,7 +360,7 @@ class ContextConditionedGP(gpytorch.models.ExactGP):
         return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
 # ============================================================
-# 2. MATH & METRICS HELPERS
+# 3. MATH, METRICS & PLOTTING HELPERS
 # ============================================================
 def gaussian_log_lik(y_pred_mean, y_pred_var, y_true):
     var_clamp = y_pred_var.clamp_min(1e-8)
@@ -385,11 +370,6 @@ def gaussian_log_lik(y_pred_mean, y_pred_var, y_true):
 def compute_standardized_se(y_pred_mean, y_pred_var, y_true):
     var_clamp = y_pred_var.clamp_min(1e-8)
     return ((y_true - y_pred_mean)**2) / var_clamp
-
-# ============================================================
-# 3. PLOTTING STYLES & HELPERS
-# ============================================================
-plt.style.use('default')
 
 METHOD_STYLES = {
     "ANP": {"color": "#E63946", "linestyle": "-", "linewidth": 2.2, "alpha": 0.85},
@@ -402,7 +382,6 @@ METHOD_STYLES = {
 
 def _plot_row(ax_hist, ax_box, data_dict, title, xlabel, bins, clip_pct, log_scale=False):
     if not data_dict: return
-
     all_vals = np.concatenate([v for v in data_dict.values()])
     x_lo, x_hi = np.percentile(all_vals, clip_pct), np.percentile(all_vals, 100 - clip_pct)
     legend_handles = []
@@ -418,7 +397,6 @@ def _plot_row(ax_hist, ax_box, data_dict, title, xlabel, bins, clip_pct, log_sca
         ax_hist.axvline(float(np.median(vals)), color=style["color"], linewidth=1.2, linestyle="--")
         legend_handles.append(mpatches.Patch(color=style["color"], label=name))
 
-    # Format Histogram
     ax_hist.set_xlim(x_lo, x_hi)
     ax_hist.set_xlabel(xlabel, fontsize=12)
     ax_hist.set_ylabel("Density", fontsize=12)
@@ -426,7 +404,6 @@ def _plot_row(ax_hist, ax_box, data_dict, title, xlabel, bins, clip_pct, log_sca
     ax_hist.tick_params(axis='both', labelsize=12)
     ax_hist.legend(handles=legend_handles, framealpha=0.85, fontsize=12)
 
-    # Format Boxplot
     bp_data, bp_names = list(data_dict.values()), list(data_dict.keys())
     flier_style = dict(marker='o', markerfacecolor='black', markersize=2, alpha=0.1, linestyle='none', markeredgecolor='none')
 
@@ -440,14 +417,11 @@ def _plot_row(ax_hist, ax_box, data_dict, title, xlabel, bins, clip_pct, log_sca
     ax_box.set_title(f"Box Plot: {title}", fontsize=15)
     ax_box.tick_params(axis='both', labelsize=12)
 
-    if log_scale in [True, 'log']:
-        ax_box.set_yscale('log')
-    elif log_scale == 'symlog':
-        ax_box.set_yscale('symlog')
+    if log_scale in [True, 'log']: ax_box.set_yscale('log')
+    elif log_scale == 'symlog': ax_box.set_yscale('symlog')
 
 def plot_all_distributions(ll_dict, se_dict, sse_dict, mse_dict, out_path, bins=80, clip_pct=0.5):
     fig, axes = plt.subplots(4, 2, figsize=(18, 15), gridspec_kw={"width_ratios": [2, 1.25]})
-
     _plot_row(axes[0, 0], axes[0, 1], ll_dict, "Log-Likelihood Distribution", "Per-node log-likelihood", bins, clip_pct, log_scale=False)
     _plot_row(axes[1, 0], axes[1, 1], sse_dict, "Standardized Squared Errors (SSE)", "Per-node SSE", bins, clip_pct, log_scale=False)
     _plot_row(axes[2, 0], axes[2, 1], se_dict, "Squared Error (SE) Distribution", "Per-node Squared Error", bins, clip_pct * 2, log_scale=False)
@@ -457,255 +431,6 @@ def plot_all_distributions(ll_dict, se_dict, sse_dict, mse_dict, out_path, bins=
     plt.subplots_adjust(hspace=0.4, wspace=0.25)
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
-
-
-# ============================================================
-# 4. SINGLE BATCH EVALUATION & 2x3 GRID PLOTTING
-# ============================================================
-def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, fixed_sens, Yh, USE_MU, device, logs_dir, model_format="np"):
-    """Evaluates a batch and outputs the 2x3 diagnostic grid and 2x5 MC plots."""
-    print("\n" + "="*60)
-    print("BATCH TESTING WITH 3 TEST SAMPLES")
-    print("="*60)
-
-    model.eval()
-    test_indices = np.array([0, 1, 2])
-    test_batch = [test_dataset[idx] for idx in test_indices]
-    eval_time_idx = 30 
-
-    for current_lag in [0, 9, 19]:
-        x_context, y_context, x_target, y_target = spatiotemporal_test_collate_fn(
-            test_batch,
-            mesh_coords=mesh_coordinates_norm,
-            fixed_sensor_locations=fixed_sens,
-            use_all_sensors=True,
-            time_idx=eval_time_idx,
-            lag=current_lag,
-            use_mu=USE_MU,
-            model_format=model_format
-        )
-
-        x_context, y_context, x_target = x_context.to(device), y_context.to(device), x_target.to(device)
-
-        # Inference
-        num_mc_samples = 100
-        with torch.no_grad():
-            y_pred_mean, y_pred_var, _, _ = model(
-                x_context, y_context, x_target, num_samples=num_mc_samples
-            )
-            
-        y_pred_mc = y_pred_mean.squeeze(-1).cpu()
-        y_pred_var_mc = y_pred_var.squeeze(-1).cpu()
-        y_target_cpu = y_target.squeeze(-1).cpu()
-
-        # Target point aggregations
-        y_pred = y_pred_mc.mean(dim=0)
-        y_pred_var_epistemic = y_pred_mc.var(dim=0, unbiased=False)
-        y_pred_var_aleatoric = y_pred_var_mc.mean(dim=0)
-        y_pred_var_total = y_pred_var_epistemic + y_pred_var_aleatoric
-
-        # Mixture Log-Likelihood Calculation (using LogSumExp)
-        var_clamp = y_pred_var_mc.clamp_min(1e-8)
-        ll_const = math.log(2.0 * math.pi)
-        sample_lls = -0.5 * (ll_const + torch.log(var_clamp) + ((y_target_cpu - y_pred_mc)**2) / var_clamp)
-        
-        M = y_pred_mc.shape[0]
-        log_lik_all = torch.logsumexp(sample_lls, dim=0) - math.log(M)
-        
-        ll_vmin_global = log_lik_all.min().item()
-        ll_vmax_global = log_lik_all.max().item()
-        if ll_vmax_global == ll_vmin_global:
-            ll_vmax_global = ll_vmin_global + 1e-8
-
-        # --- Plotting per sample in batch ---
-        for batch_idx in range(3):
-            if USE_MU:
-                context = x_context[batch_idx].cpu()[:, 4:6]
-            else:
-                context = x_context[batch_idx].cpu()[:, 1:3]
-            
-            sample_pred_runs = y_pred_mc[:, batch_idx, :]
-            sample_pred = y_pred[batch_idx]
-            sample_target = y_target_cpu[batch_idx]
-            
-            sample_total_var = y_pred_var_total[batch_idx]
-            sample_total_std = torch.sqrt(sample_total_var.clamp_min(1e-8))
-            sample_sq_error = (sample_pred - sample_target) ** 2
-            sample_log_lik = log_lik_all[batch_idx]
-            
-            sample_sse = sample_sq_error / sample_total_var.clamp_min(1e-8)
-
-            # Colormap Limits
-            state_vmin = torch.min(sample_pred_runs.min(), sample_target.min()).item()
-            state_vmax = torch.max(sample_pred_runs.max(), sample_target.max()).item()
-            if state_vmax == state_vmin: state_vmax = state_vmin + 1e-8
-            
-            std_vmin, std_vmax = sample_total_std.min().item(), sample_total_std.max().item()
-            if std_vmax == std_vmin: std_vmax = std_vmin + 1e-8
-            
-            sq_err_vmin, sq_err_vmax = 0.0, sample_sq_error.max().item()
-            if sq_err_vmax == sq_err_vmin: sq_err_vmax = sq_err_vmin + 1e-8
-                
-            sse_vmin, sse_vmax = 0.0, sample_sse.max().item()
-            if sse_vmax == sse_vmin: sse_vmax = sse_vmin + 1e-8
-
-            # NOTE: Assuming `plot_with_colorbar` is provided or imported from your custom libs
-            # We mock the call structure here as per your original script
-            def _local_plot(val_array, cmap, vmin, vmax, title, ax):
-                plt.sca(ax)
-                plot_with_colorbar(val_array, Yh, cmap=cmap, vmin=vmin, vmax=vmax, label=title)
-                plt.scatter(context[:, 0], context[:, 1], color='red', s=20)
-                ax.set_title(title, fontsize=25)
-                ax.axis('off')
-
-            # ----------------------------------------------------
-            # A. 2x3 AGGREGATE METRICS GRID
-            # ----------------------------------------------------
-            fig, axes = plt.subplots(2, 3, figsize=(30, 16))
-            
-            _local_plot(sample_target, "jet", state_vmin, state_vmax, "Truth", axes[0, 0])
-            _local_plot(sample_pred, "jet", state_vmin, state_vmax, f"Mean Prediction", axes[0, 1])
-            _local_plot(sample_sq_error, "magma", sq_err_vmin, sq_err_vmax, "Squared Error (MSE)", axes[0, 2])
-            _local_plot(sample_total_std, "magma", std_vmin, std_vmax, "Standard Deviation", axes[1, 0])
-            _local_plot(sample_log_lik, "magma", ll_vmin_global, ll_vmax_global, "Log-likelihood", axes[1, 1])
-            _local_plot(sample_sse, "magma", sse_vmin, sse_vmax, "Standardized SE", axes[1, 2])
-
-            plt.tight_layout(rect=[0, 0, 1, 0.95])
-            grid_path = logs_dir / f"multiplot_grid_2x3_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png"
-            plt.savefig(grid_path, dpi=300, bbox_inches="tight")
-            plt.close(fig)
-
-            # ----------------------------------------------------
-            # B. 2x5 MONTE CARLO SAMPLES
-            # ----------------------------------------------------
-            fig_mc, axes_mc = plt.subplots(2, 5, figsize=(25, 10))
-            fig_mc.suptitle(f"10 Monte Carlo Samples | Sample {test_indices[batch_idx]} | Time: {eval_time_idx} | Lag: {current_lag}", fontsize=25)
-
-            for i in range(10):
-                row, col = i // 5, i % 5
-                _local_plot(sample_pred_runs[i], "jet", state_vmin, state_vmax, f"MC Run {i+1}", axes_mc[row, col])
-
-            plt.tight_layout(rect=[0, 0, 1, 0.95])
-            mc_path = logs_dir / f"mc_10_samples_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png"
-            plt.savefig(mc_path, dpi=300, bbox_inches="tight")
-            plt.close(fig_mc)
-
-def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, fixed_sens, Yh, USE_MU, device, logs_dir, is_probabilistic=False, model_format="np", likelihood=None, y_mean=None, y_std=None):
-    """Evaluates a batch for Non-Monte Carlo methods, including GPs."""
-    print("\n" + "="*60)
-    mode_str = "PROBABILISTIC (GP)" if model_format == "gp" else ("PROBABILISTIC (Non-MC)" if is_probabilistic else "DETERMINISTIC")
-    print(f"BATCH TESTING SAMPLES | {mode_str}")
-    print("="*60)
-
-    model.eval()
-    if likelihood is not None: likelihood.eval()
-    
-    test_indices = np.array([0, 1, 2])
-    test_batch = [test_dataset[idx] for idx in test_indices]
-    eval_time_idx = 30 
-
-    for current_lag in [0, 9, 19]:
-        x_context, y_context, x_target, y_target = spatiotemporal_test_collate_fn(
-            test_batch, mesh_coords=mesh_coordinates_norm, fixed_sensor_locations=fixed_sens,
-            use_all_sensors=True, time_idx=eval_time_idx, lag=current_lag,
-            use_mu=USE_MU, model_format="np" if model_format == "gp" else model_format
-        )
-
-        x_context, y_context, x_target = x_context.to(device), y_context.to(device) if y_context is not None else None, x_target.to(device)
-
-        with torch.no_grad():
-            if model_format == "gp":
-                y_pred_list, y_pred_var_list = [], []
-                # GP must be conditioned one sample at a time
-                for b_idx in range(len(test_batch)):
-                    x_ctx = x_context[b_idx]
-                    y_ctx = y_context[b_idx].squeeze(-1)
-                    x_tgt = x_target[b_idx]
-                    
-                    if y_mean is not None:
-                        y_ctx = (y_ctx - y_mean) / y_std
-                        
-                    model.set_train_data(inputs=x_ctx, targets=y_ctx, strict=False)
-                    with gpytorch.settings.fast_pred_var():
-                        preds = likelihood(model(x_tgt))
-                        pm, pv = preds.mean.cpu(), preds.variance.cpu()
-                        
-                    if y_mean is not None:
-                        pm = pm * y_std + y_mean
-                        pv = pv * (y_std ** 2)
-                    y_pred_list.append(pm)
-                    y_pred_var_list.append(pv)
-                    
-                y_pred = torch.stack(y_pred_list)
-                y_pred_var = torch.stack(y_pred_var_list)
-            else:
-                outputs = model(x_context, x_target) if y_context is None else model(x_context, y_context, x_target)
-                if isinstance(outputs, tuple):
-                    y_pred, y_pred_var = outputs[0], outputs[1] if (is_probabilistic and len(outputs) > 1) else None
-                else:
-                    y_pred, y_pred_var = outputs, None
-                y_pred = y_pred.squeeze(-1).cpu()
-                if y_pred_var is not None: y_pred_var = y_pred_var.squeeze(-1).cpu()
-
-        y_target_cpu = y_target.squeeze(-1).cpu()
-
-        if is_probabilistic and y_pred_var is not None:
-            var_clamp = y_pred_var.clamp_min(1e-8)
-            ll_const = math.log(2.0 * math.pi)
-            log_lik_all = -0.5 * (ll_const + torch.log(var_clamp) + ((y_target_cpu - y_pred)**2) / var_clamp)
-            ll_vmin_global, ll_vmax_global = log_lik_all.min().item(), log_lik_all.max().item()
-            if ll_vmax_global == ll_vmin_global: ll_vmax_global = ll_vmin_global + 1e-8
-        else:
-            log_lik_all = None
-
-        for batch_idx in range(3):
-            context = x_context[batch_idx].cpu()[:, 4:6] if USE_MU else x_context[batch_idx].cpu()[:, 1:3]
-            sample_pred = y_pred[batch_idx]
-            sample_target = y_target_cpu[batch_idx]
-            sample_sq_error = (sample_pred - sample_target) ** 2
-            
-            state_vmin, state_vmax = torch.min(sample_pred.min(), sample_target.min()).item(), torch.max(sample_pred.max(), sample_target.max()).item()
-            if state_vmax == state_vmin: state_vmax = state_vmin + 1e-8
-            
-            sq_err_vmin, sq_err_vmax = 0.0, sample_sq_error.max().item()
-            if sq_err_vmax == sq_err_vmin: sq_err_vmax = sq_err_vmin + 1e-8
-
-            def _local_plot(val_array, cmap, vmin, vmax, title, ax):
-                plt.sca(ax)
-                plot_with_colorbar(val_array, Yh, cmap=cmap, vmin=vmin, vmax=vmax, label=title)
-                plt.scatter(context[:, 0], context[:, 1], color='red', s=20)
-                ax.set_title(title, fontsize=25)
-                ax.axis('off')
-
-            if is_probabilistic and y_pred_var is not None:
-                sample_var = y_pred_var[batch_idx]
-                sample_std = torch.sqrt(sample_var.clamp_min(1e-8))
-                sample_log_lik = log_lik_all[batch_idx]
-                sample_sse = sample_sq_error / sample_var.clamp_min(1e-8)
-
-                std_vmin, std_vmax = sample_std.min().item(), sample_std.max().item()
-                if std_vmax == std_vmin: std_vmax = std_vmin + 1e-8
-                sse_vmin, sse_vmax = 0.0, sample_sse.max().item()
-                if sse_vmax == sse_vmin: sse_vmax = sse_vmin + 1e-8
-
-                fig, axes = plt.subplots(2, 3, figsize=(30, 16))
-                _local_plot(sample_target, "jet", state_vmin, state_vmax, "Truth", axes[0, 0])
-                _local_plot(sample_pred, "jet", state_vmin, state_vmax, "Mean Prediction", axes[0, 1])
-                _local_plot(sample_sq_error, "magma", sq_err_vmin, sq_err_vmax, "Squared Error (MSE)", axes[0, 2])
-                _local_plot(sample_std, "magma", std_vmin, std_vmax, "Standard Deviation", axes[1, 0])
-                _local_plot(sample_log_lik, "magma", ll_vmin_global, ll_vmax_global, "Log-likelihood", axes[1, 1])
-                _local_plot(sample_sse, "magma", sse_vmin, sse_vmax, "Standardized SE", axes[1, 2])
-                grid_suffix = "prob_2x3"
-            else:
-                fig, axes = plt.subplots(1, 3, figsize=(30, 8))
-                _local_plot(sample_target, "jet", state_vmin, state_vmax, "Truth", axes[0])
-                _local_plot(sample_pred, "jet", state_vmin, state_vmax, "Prediction", axes[1])
-                _local_plot(sample_sq_error, "magma", sq_err_vmin, sq_err_vmax, "Squared Error", axes[2])
-                grid_suffix = "det_1x3"
-
-            plt.tight_layout(rect=[0, 0, 1, 0.95])
-            plt.savefig(logs_dir / f"multiplot_grid_{grid_suffix}_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
-            plt.close(fig)
 
 def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, device, time_idx, lag, sensors_to_use, drop_options, mc_samples=100, is_mc=True, model_format="np", likelihood=None, y_mean=None, y_std=None):
     all_ll, all_se, all_sse, all_mse = [], [], [], []
@@ -723,9 +448,6 @@ def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coord
 
         with torch.no_grad():
             if model_format == "gp":
-                # ==========================================
-                # EXACT GAUSSIAN PROCESS INFERENCE
-                # ==========================================
                 x_ctx, y_ctx, x_tgt = x_c[0], y_c[0].squeeze(-1), x_t[0]
                 y_true = y_t[0].squeeze(-1).cpu()
 
@@ -742,9 +464,6 @@ def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coord
 
                 final_ll = gaussian_log_lik(pred_mean, pred_var, y_true)
             elif is_mc:
-                # ==========================================
-                # MONTE CARLO INFERENCE (NP)
-                # ==========================================
                 try:
                     mu_mc, var_mc, *_ = model(x_c, y_c, x_t, num_samples=mc_samples)
                     mc_means, mc_vars = mu_mc.squeeze(-1).cpu(), var_mc.squeeze(-1).cpu()
@@ -757,9 +476,6 @@ def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coord
                 y_true = y_t.squeeze(-1).squeeze(0).cpu()
                 final_ll = torch.logsumexp(gaussian_log_lik(mc_means.squeeze(1), mc_vars.squeeze(1), y_true.unsqueeze(0)), dim=0) - math.log(mc_samples)
             else:
-                # ==========================================
-                # DETERMINISTIC (DeepONet)
-                # ==========================================
                 outputs = model(x_c, x_t) if y_c is None else model(x_c, y_c, x_t)
                 if isinstance(outputs, tuple):
                     pred_mean, pred_var = outputs[0], outputs[1]
@@ -786,53 +502,38 @@ def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coord
 
     return torch.cat(all_ll).numpy(), torch.cat(all_se).numpy(), torch.cat(all_sse).numpy(), torch.cat(all_mse).numpy()
 
+# ============================================================
+# 4. MAIN EXECUTION
+# ============================================================
 def main():
-    USE_MU = False
+    USE_MU = False  # Toggle whether to use mu conditioning
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    print(f"Running on: {device} | Kaggle Environment: {IS_KAGGLE}")
 
-    # ==========================================
-    # 1. SETUP PATHS & DIRECTORIES
-    # ==========================================
-    # Matches the directory structure from pinball_2.py
-    script_dir = Path(__file__).resolve().parent
-    logs_dir = script_dir / f"logs_compare"
-    checkpoints_dir_anp = script_dir / f"checkpoints_pinball_{'mu' if USE_MU else 'no_mu'}_new_5sens"
-    checkpoints_dir_lnp = script_dir / f"checkpoints_pinball_{'mu' if USE_MU else 'no_mu'}_3"
-    checkpoints_dir_deeponet = script_dir / f"checkpoints_pinball_fc_deterministic_{'with_mu' if USE_MU else 'without_mu'}_lag_20"
-    checkpoints_dir_shred = script_dir / f"checkpoints_pinball_shred_{'with_mu' if USE_MU else 'without_mu'}_lag_20"
-    checkpoints_dir_gp = script_dir / f"checkpoints_pinball_gp_lag_20"
-    checkpoints_dir_probdeeponet = script_dir / f"checkpoints_pinball_fc_{'with_mu' if USE_MU else 'without_mu'}_lag20"
-    
+    # Create all log subdirectories in output location
+    logs_dir = OUTPUT_LOGS_DIR
     logs_dir.mkdir(parents=True, exist_ok=True)
-    (logs_dir / "logs_anp").mkdir(parents=True, exist_ok=True) # <--- ADD THIS
-    (logs_dir / "logs_lnp").mkdir(parents=True, exist_ok=True) # <--- ADD THIS
-    (logs_dir / "logs_deeponet").mkdir(parents=True, exist_ok=True) # <--- ADD THIS
-    (logs_dir / "logs_shred").mkdir(parents=True, exist_ok=True) # <--- ADD THIS
-    (logs_dir / "logs_gp").mkdir(parents=True, exist_ok=True) # <--- ADD THIS
-    (logs_dir / "logs_probdeeponet").mkdir(parents=True, exist_ok=True) # <--- ADD THIS
+    for sub in ["logs_anp", "logs_lnp", "logs_deeponet", "logs_shred", "logs_gp", "logs_probdeeponet"]:
+        (logs_dir / sub).mkdir(parents=True, exist_ok=True)
 
-    # ==========================================
-    # 2. LOAD MESH & FENICS SPACE
-    # ==========================================
-    # Requires FEniCS import here or at the top of the file
-    from dolfin import Mesh, FunctionSpace
-    
+    # 1. Load Mesh
     print("Loading FEniCS Mesh...")
-    mesh = Mesh(str(resolve_pinball_asset(script_dir, "Pinball_mesh.xml")))
+    mesh = Mesh(str(CHECKPOINT_PATHS["mesh"]))
     Yh = FunctionSpace(mesh, "CG", 1)
     nstate = Yh.dim()
-    
     mesh_coordinates = torch.as_tensor(Yh.tabulate_dof_coordinates(), dtype=torch.float32)
-    mesh_coordinates_norm = mesh_coordinates  # Using actual coordinates without normalization
-    
-    fixed_sens = [1573, 6925, 1986]
+    mesh_coordinates_norm = mesh_coordinates
 
-    # ==========================================
-    # 3. LOAD & SPLIT DATA
-    # ==========================================
+    # 2. Load Sensors & Data
+    if CHECKPOINT_PATHS["fixed_sensors"].exists():
+        fixed_sens = torch.load(str(CHECKPOINT_PATHS["fixed_sensors"]), weights_only=False)
+        if isinstance(fixed_sens, torch.Tensor):
+            fixed_sens = fixed_sens.tolist()
+    else:
+        fixed_sens = [1573, 6925, 1986]
+
     print("Loading NPZ data and splitting...")
-    Data = np.load(str(resolve_pinball_asset(script_dir, "Pinball_data.npz")))
+    Data = np.load(str(CHECKPOINT_PATHS["data"]))
     Y = torch.tensor(Data["y"])
     MU = torch.tensor(Data["mu"])
     
@@ -840,7 +541,6 @@ def main():
     dt = 0.1
     ntimes = round(3.0 / dt) + 1
 
-    # Exact Train/Valid/Test split from pinball_2.py
     np.random.seed(0)
     ntrain = round(0.8 * ntrajectories)
     idx_train = np.random.choice(ntrajectories, size=ntrain, replace=False)
@@ -849,36 +549,28 @@ def main():
     idx_valid_test = np.arange(0, ntrajectories)[np.where(mask!=0)[0]]
     idx_test = idx_valid_test[1::2]
 
-    # After generating idx_train...
     Ytrain = Y[idx_train]
     y_mean = Ytrain.mean().item()
     y_std = Ytrain.std().item()
 
-    # Reshape specifically for the spatiotemporal setup
     Ytest = Y[idx_test].reshape(idx_test.shape[0], ntimes, nstate)
     MUtest = MU[idx_test]
+    test_dataset = SpatiotemporalDataset(Ytest, MUtest if USE_MU else None)
 
-    if USE_MU:
-        test_dataset = SpatiotemporalDataset(Ytest, MUtest)
-    else:
-        test_dataset = SpatiotemporalDataset(Ytest)
+    # 3. Model Hyperparameters
+    x_dim = 6 if USE_MU else 3
+    y_dim = 1
+    r_dim = 128
+    z_dim = 128
+    hidden_dim = 128
+    n_hidden = 2
 
-    # ==========================================
-    # 4. INITIALIZE & LOAD MODEL
-    # ==========================================
-    print("Initializing LatNP model...")
-    # Model hyperparameters - For full-dimensional spatiotemporal data
-    if USE_MU:
-        x_dim = 6
-    else:
-        x_dim = 3  # Input dimension: [time, x, y] coordinates (actual mesh coordinates!)
-    y_dim = 1  # Output dimension: state value
-    r_dim = 128  # Representation dimension
-    z_dim = 128 # Latent dimension
-    hidden_dim = 128  # Hidden layer dimension
-    n_hidden = 2  # Number of hidden layers
+    # Choose correct checkpoint key depending on USE_MU flag
+    anp_key = "anp_mu" if (IS_KAGGLE and USE_MU) else ("anp_no_mu" if IS_KAGGLE else "anp")
+    lnp_key = "lnp_mu" if (IS_KAGGLE and USE_MU) else ("lnp_no_mu" if IS_KAGGLE else "lnp")
 
-    # Create model
+    # 4. Initialize ANP (Matching checkpoints with `no_dndec`)
+    print("Initializing ANP...")
     model_anp = LatNP(
         x_dim=x_dim,
         y_dim=y_dim,
@@ -888,181 +580,21 @@ def main():
         n_hidden=n_hidden,
         activation=nn.ReLU,
         dropout=0.0,
-        is_normalized=True,  # Layer normalization helps training stability
+        is_normalized=True,
         norm_type='layer',
-        fourier_vars = 3,
-        num_frequencies = 32, #number of fourier features for the spatial coordinates (x,y)
-        num_heads = 4, #number of attention heads in the cross-attention module
-        fourier_scale = 1.0, #scale of the fourier features for the spatial coordinates (x,y)
-        learnable_fourier = True, #whether to learn the fourier features for the spatial coordinates (x,y)
-        use_skip = True, #whether to use skip connections in the decoder
-        use_deeponet_decoder = True, #whether to use a DeepONet-style decoder
+        fourier_vars=3,
+        num_frequencies=32,
+        num_heads=4,
+        fourier_scale=1.0,
+        learnable_fourier=True,
+        use_skip=True,
+        use_deeponet_decoder=False, # Set to False for 'no_dndec' checkpoints
     ).to(device)
-
-    best_model_path = checkpoints_dir_anp / "best_model.pt"
-    if best_model_path.exists():
-        print(f"Loading weights from {best_model_path}...")
-        checkpoint = torch.load(best_model_path, map_location=device)
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            model_anp.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            model_anp.load_state_dict(checkpoint)
-    else:
-        print(f"\n[!] WARNING: Model checkpoint not found at {best_model_path}! Running with untrained weights.\n")
-
+    model_anp = load_model_checkpoint(model_anp, CHECKPOINT_PATHS[anp_key], device)
     model_anp.eval()
 
-    # ==========================================
-    # 5. RUN EVALUATION DIAGNOSTICS
-    # ==========================================
-
-    # ==========================================
-    # 5D. Plot Ground Truth with Sensor Annotations
-    # ==========================================
-    
-    print("\nGenerating final ground truth plot with sensor locations...")
-    time_idx = 30
-    sample_idx = 0
-
-    # Extract the truth field for the specific sample and time
-    if torch.is_tensor(Ytest):
-        truth_field = Ytest[sample_idx, time_idx].cpu().numpy()
-    else:
-        truth_field = Ytest[sample_idx, time_idx]
-
-    # Get the physical (x, y) coordinates of the fixed sensors
-    sensor_coords = mesh_coordinates[fixed_sens].cpu().numpy()
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    # Plot the base state field
-    plot_with_colorbar(truth_field, Yh, ax=ax, cmap="jet", label="True State")
-
-    # Overlay the sensors
-    for i, sensor_idx in enumerate(fixed_sens):
-        x, y = sensor_coords[i, 0], sensor_coords[i, 1]
-
-        # Draw the red 'X' marker
-        ax.scatter(x, y, color='red', s=80, marker='X', edgecolor='black', linewidth=1.5, zorder=5)
-
-        # Annotate with the sensor index number
-        ax.annotate(str(sensor_idx),
-                    (x, y),
-                    xytext=(8, 8), textcoords='offset points',
-                    color='black', fontsize=11, fontweight='bold',
-                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", lw=0.8, alpha=0.9),
-                    zorder=6)
-
-    ax.set_title(f"Ground Truth (Test Trajectory {sample_idx}, Time = {time_idx}) with Sensor Locations", fontsize=15)
-    ax.set_xlabel("X Coordinate", fontsize=12)
-    ax.set_ylabel("Y Coordinate", fontsize=12)
-
-    plt.tight_layout()
-    
-    # Save the figure
-    sensor_plot_path = logs_dir / "ground_truth_sensors.png"
-    fig.savefig(sensor_plot_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved sensor position map to {sensor_plot_path}")    
-    
-    
-    # 5A. Single Batch Grid (2x3 Plot + 2x5 MC plot)
-    plot_batch_diagnostics(
-        model=model_anp, 
-        test_dataset=test_dataset, 
-        spatiotemporal_test_collate_fn=unified_test_collate_fn, 
-        mesh_coordinates_norm=mesh_coordinates_norm, 
-        fixed_sens=fixed_sens, 
-        Yh=Yh, 
-        USE_MU=USE_MU,
-        device=device, 
-        logs_dir=logs_dir / "logs_anp",
-        model_format="np"
-    )
-
-    # 5B. Full Dataset Global Distribution
-    print("\nRunning Multi-Lag Global Distribution Evaluation...")
-    ll_dict_A_anp, se_dict_A_anp, sse_dict_A_anp, mse_dict_A_anp = {}, {}, {}, {}
-    lags_to_test = [0, 9, 19]
-    colors_A = ["#E63946", "#457B9D", "#2A9D8F"]
-
-    for i, lag in enumerate(lags_to_test):
-        label = f"NP (Lag {lag + 1})"
-        print(f"  Evaluating {label}...")
-        METHOD_STYLES[label] = {"color": colors_A[i], "linestyle": "-", "linewidth": 2.2, "alpha": 0.85}
-
-        ll, se, sse, mse = evaluate_scenario(
-            model=model_anp,
-            dataset=test_dataset,
-            spatiotemporal_test_collate_fn=unified_test_collate_fn,
-            mesh_coordinates_norm=mesh_coordinates_norm,
-            device=device,
-            time_idx=30,
-            lag=lag,
-            sensors_to_use=fixed_sens,
-            drop_options=[0]
-        )
-        ll_dict_A_anp[label], se_dict_A_anp[label], sse_dict_A_anp[label], mse_dict_A_anp[label] = ll, se, sse, mse
-
-    print("Saving global distribution plots...")
-    out_path = logs_dir / "diagnostics_anp_lags_0_9_19.png"
-    plot_all_distributions(ll_dict_A_anp, se_dict_A_anp, sse_dict_A_anp, mse_dict_A_anp, out_path=out_path)
-    
-    # ==========================================
-    # 5C. Scenario B: Sensor Ablation Diagnostics
-    # ==========================================
-    print("\nRunning Scenario B: Lag 9, Dropping Sensors (Ablation Diagnostics)...")
-    
-    ll_dict_B_anp, se_dict_B_anp, sse_dict_B_anp, mse_dict_B_anp = {}, {}, {}, {}
-
-    # Updated configs to match your 3 fixed sensors: [1573, 6925, 1986]
-    configs_B = [
-        ("All Sensors",         [1573, 6925, 1986], "#000000"),
-        ("Missing Sensor 1573", [6925, 1986],       "#E63946"),
-        ("Missing Sensor 6925", [1573, 1986],       "#F4A261"),
-        ("Missing Sensor 1986", [1573, 6925],       "#2A9D8F")
-    ]
-
-    for label, sens_list, color in configs_B:
-        print(f"  Evaluating {label}...")
-
-        # Set styling for the boxplots/histograms
-        METHOD_STYLES[label] = {"color": color, "linestyle": "-", "linewidth": 2.2, "alpha": 0.85}
-
-        ll, se, sse, mse = evaluate_scenario(
-            model=model_anp,
-            dataset=test_dataset,
-            spatiotemporal_test_collate_fn=unified_test_collate_fn,
-            mesh_coordinates_norm=mesh_coordinates_norm,
-            device=device,
-            time_idx=30,   # Keep time index consistent
-            lag=9,         # Fixed lag for ablation test
-            sensors_to_use=sens_list,
-            drop_options=[0],
-            mc_samples=100
-        )
-
-        ll_dict_B_anp[label] = ll
-        se_dict_B_anp[label] = se
-        sse_dict_B_anp[label] = sse
-        mse_dict_B_anp[label] = mse
-
-    print("Saving ablation diagnostics plot...")
-    ablation_out_path = logs_dir / "diagnostics_anp_lag9_drop_sensors.png"
-    plot_all_distributions(
-        ll_dict_B_anp, 
-        se_dict_B_anp, 
-        sse_dict_B_anp, 
-        mse_dict_B_anp, 
-        out_path=ablation_out_path
-    )
-    
-    #==========================================
-    # 6. Load Latent Neural Process (LatNP) Model
-    #==========================================
-    
-    # Create model
-    # Create model
+    # 5. Initialize LatNP
+    print("Initializing LNP...")
     model_lnp = LatNP_simple(
         x_dim=x_dim,
         y_dim=y_dim,
@@ -1072,377 +604,62 @@ def main():
         n_hidden=n_hidden,
         activation=nn.SiLU,
         dropout=0.0,
-        is_normalized=True,  # Layer normalization helps training stability
+        is_normalized=True,
         norm_type='layer',
         fourier_vars=3,
-        num_frequencies=32, # number of fourier features for the spatial coordinates (x,y)
-        fourier_scale=1.0,  # scale of the fourier features for the spatial coordinates (x,y)
-        learnable_fourier=True, # whether to learn the fourier features for the spatial coordinates (x,y)
-        use_deeponet_decoder=True, # whether to use a DeepONet decoder for the latent variable z
+        num_frequencies=32,
+        fourier_scale=1.0,
+        learnable_fourier=True,
+        use_deeponet_decoder=False, # Set to False for 'no_dndec' checkpoints
         p=128,
     ).to(device)
-    
-    best_model_path_lnp = checkpoints_dir_lnp / "best_model.pt"
-    if best_model_path_lnp.exists():
-        print(f"Loading weights from {best_model_path_lnp}...")
-        checkpoint = torch.load(best_model_path_lnp, map_location=device)
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            model_lnp.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            model_lnp.load_state_dict(checkpoint)
-    else:
-        print(f"\n[!] WARNING: Model checkpoint not found at {best_model_path_lnp}! Running with untrained weights.\n")
-
+    model_lnp = load_model_checkpoint(model_lnp, CHECKPOINT_PATHS[lnp_key], device)
     model_lnp.eval()
-    
-    #==========================================
-    # 6a. plots for Latent Neural Process (LatNP) Model
-    #==========================================
-    
-    print("\nGenerating final ground truth plot with sensor locations...")
-    time_idx = 30
-    sample_idx = 0
 
-    # Extract the truth field for the specific sample and time
-    if torch.is_tensor(Ytest):
-        truth_field = Ytest[sample_idx, time_idx].cpu().numpy()
-    else:
-        truth_field = Ytest[sample_idx, time_idx]
-
-    # Get the physical (x, y) coordinates of the fixed sensors
-    sensor_coords = mesh_coordinates[fixed_sens].cpu().numpy()
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-
-    # Plot the base state field
-    plot_with_colorbar(truth_field, Yh, ax=ax, cmap="jet", label="True State")
-
-    # Overlay the sensors
-    for i, sensor_idx in enumerate(fixed_sens):
-        x, y = sensor_coords[i, 0], sensor_coords[i, 1]
-
-        # Draw the red 'X' marker
-        ax.scatter(x, y, color='red', s=80, marker='X', edgecolor='black', linewidth=1.5, zorder=5)
-
-        # Annotate with the sensor index number
-        ax.annotate(str(sensor_idx),
-                    (x, y),
-                    xytext=(8, 8), textcoords='offset points',
-                    color='black', fontsize=11, fontweight='bold',
-                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", lw=0.8, alpha=0.9),
-                    zorder=6)
-
-    ax.set_title(f"Ground Truth (Test Trajectory {sample_idx}, Time = {time_idx}) with Sensor Locations", fontsize=15)
-    ax.set_xlabel("X Coordinate", fontsize=12)
-    ax.set_ylabel("Y Coordinate", fontsize=12)
-
-    plt.tight_layout()
-    
-    # Save the figure
-    sensor_plot_path = logs_dir / "ground_truth_sensors.png"
-    fig.savefig(sensor_plot_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved sensor position map to {sensor_plot_path}")    
-    
-    
-    # 5A. Single Batch Grid (2x3 Plot + 2x5 MC plot)
-    plot_batch_diagnostics(
-        model=model_lnp, 
-        test_dataset=test_dataset, 
-        spatiotemporal_test_collate_fn=unified_test_collate_fn, 
-        mesh_coordinates_norm=mesh_coordinates_norm, 
-        fixed_sens=fixed_sens, 
-        Yh=Yh, 
-        USE_MU=USE_MU,
-        device=device, 
-        logs_dir=logs_dir / "logs_lnp",
-        model_format="np"
-    )
-
-    # 5B. Full Dataset Global Distribution
-    print("\nRunning Multi-Lag Global Distribution Evaluation...")
-    ll_dict_A_lnp, se_dict_A_lnp, sse_dict_A_lnp, mse_dict_A_lnp = {}, {}, {}, {}
-    lags_to_test = [0, 9, 19]
-    colors_A = ["#E63946", "#457B9D", "#2A9D8F"]
-
-    for i, lag in enumerate(lags_to_test):
-        label = f"NP (Lag {lag + 1})"
-        print(f"  Evaluating {label}...")
-        METHOD_STYLES[label] = {"color": colors_A[i], "linestyle": "-", "linewidth": 2.2, "alpha": 0.85}
-
-        ll, se, sse, mse = evaluate_scenario(
-            model=model_lnp,
-            dataset=SpatiotemporalDataset(Ytest, MUtest),
-            spatiotemporal_test_collate_fn=unified_test_collate_fn,
-            mesh_coordinates_norm=mesh_coordinates_norm,
-            device=device,
-            time_idx=30,
-            lag=lag,
-            sensors_to_use=fixed_sens,
-            drop_options=[0]
-        )
-        ll_dict_A_lnp[label], se_dict_A_lnp[label], sse_dict_A_lnp[label], mse_dict_A_lnp[label] = ll, se, sse, mse
-
-    print("Saving global distribution plots...")
-    out_path = logs_dir / "diagnostics_lnp_lags_0_9_19.png"
-    plot_all_distributions(ll_dict_A_lnp, se_dict_A_lnp, sse_dict_A_lnp, mse_dict_A_lnp, out_path=out_path)
-
-    # ==========================================
-    # 5C. Scenario B: Sensor Ablation Diagnostics
-    # ==========================================
-    print("\nRunning Scenario B: Lag 9, Dropping Sensors (Ablation Diagnostics)...")
-    
-    ll_dict_B_lnp, se_dict_B_lnp, sse_dict_B_lnp, mse_dict_B_lnp = {}, {}, {}, {}
-
-    # Updated configs to match your 3 fixed sensors: [1573, 6925, 1986]
-    configs_B = [
-        ("All Sensors",         [1573, 6925, 1986], "#000000"),
-        ("Missing Sensor 1573", [6925, 1986],       "#E63946"),
-        ("Missing Sensor 6925", [1573, 1986],       "#F4A261"),
-        ("Missing Sensor 1986", [1573, 6925],       "#2A9D8F")
-    ]
-
-    for label, sens_list, color in configs_B:
-        print(f"  Evaluating {label}...")
-
-        # Set styling for the boxplots/histograms
-        METHOD_STYLES[label] = {"color": color, "linestyle": "-", "linewidth": 2.2, "alpha": 0.85}
-
-        ll, se, sse, mse = evaluate_scenario(
-            model=model_lnp,
-            dataset=test_dataset,
-            spatiotemporal_test_collate_fn=unified_test_collate_fn,
-            mesh_coordinates_norm=mesh_coordinates_norm,
-            device=device,
-            time_idx=30,   # Keep time index consistent
-            lag=9,         # Fixed lag for ablation test
-            sensors_to_use=sens_list,
-            drop_options=[0],
-            mc_samples=100
-        )
-
-        ll_dict_B_lnp[label] = ll
-        se_dict_B_lnp[label] = se
-        sse_dict_B_lnp[label] = sse
-        mse_dict_B_lnp[label] = mse
-
-    print("Saving ablation diagnostics plot...")
-    ablation_out_path = logs_dir / "diagnostics_lnp_lag9_drop_sensors.png"
-    plot_all_distributions(
-        ll_dict_B_lnp, 
-        se_dict_B_lnp, 
-        sse_dict_B_lnp, 
-        mse_dict_B_lnp, 
-        out_path=ablation_out_path
-    )
-    
-    #==========================================
-    # 7. Additional models (DeepONet, Shred, GP, ProbDeepONet) can be loaded and evaluated similarly
-    #==========================================
-    
-    # Conditionally pass nparams to the model based on the toggle
+    # 6. Initialize Probabilistic DeepONet
     model_probdeeponet = DeepONetMeanVar(
         num_sensors=len(fixed_sens), 
         num_params=3 if USE_MU else 0,
         coord_dim=3, 
         p=128
     ).to(device)
-    
-    best_path = checkpoints_dir_probdeeponet / "best_model.pt"
-    if best_path.exists():
-        model_probdeeponet.load_state_dict(torch.load(best_path, map_location=device))
+    model_probdeeponet = load_model_checkpoint(model_probdeeponet, CHECKPOINT_PATHS["probdeeponet"], device)
+    model_probdeeponet.eval()
 
-    
-    # 7A. Single Batch Grid (2x3 Plot + 2x5 MC plot)
-    plot_non_mc_batch_diagnostics(
-        model=model_probdeeponet, 
-        test_dataset=test_dataset,       # <--- Use the unified dataset
-        spatiotemporal_test_collate_fn=unified_test_collate_fn, 
-        mesh_coordinates_norm=mesh_coordinates_norm, 
-        fixed_sens=fixed_sens, 
-        Yh=Yh, 
-        USE_MU=USE_MU,
-        device=device, 
-        logs_dir=logs_dir / "logs_probdeeponet",  # <--- Fix: Don't overwrite the lnp logs!
-        is_probabilistic=True,
-        model_format="don"
-    )
-    
-    # ==============================================================================
-    # 8. DeepONet (Deterministic)
-    # ==============================================================================
+    # 7. Initialize Deterministic DeepONet
     model_don = DeepONetDeterministic(
         num_sensors=len(fixed_sens), 
         num_params=3 if USE_MU else 0,
         coord_dim=3, 
         p=128
     ).to(device)
-    
-    print("\nRunning DeepONet Evaluation...")
-    best_path_don = checkpoints_dir_deeponet / "best_model.pt"
-    if best_path_don.exists():
-        model_don.load_state_dict(torch.load(best_path_don, map_location=device))
-    else:
-        print(f"[!] WARNING: Model checkpoint not found at {best_path_don}!")
-        
+    model_don = load_model_checkpoint(model_don, CHECKPOINT_PATHS["deeponet"], device)
     model_don.eval()
 
-    # 8A. Single Batch Grid (1x3 Plot for deterministic)
-    plot_non_mc_batch_diagnostics(
-        model=model_don, 
-        test_dataset=test_dataset,       # <--- Use unified dataset
-        spatiotemporal_test_collate_fn=unified_test_collate_fn, 
-        mesh_coordinates_norm=mesh_coordinates_norm, 
-        fixed_sens=fixed_sens, 
-        Yh=Yh, 
-        USE_MU=USE_MU,
-        device=device, 
-        logs_dir=logs_dir / "logs_deeponet",
-        is_probabilistic=False,          # <--- Forces the 1x3 deterministic grid
-        model_format="don"
-    )
-
-    # ==============================================================================
-    # 9. Context-Conditioned GP
-    # ==============================================================================
-    print("\nRunning Context-Conditioned GP Evaluation...")
-    
+    # 8. Initialize Context GP
     likelihood_gp = gpytorch.likelihoods.GaussianLikelihood().to(device)
     dummy_x = torch.zeros(2, 6).to(device)
     dummy_y = torch.zeros(2).to(device)
     model_gp = ContextConditionedGP(dummy_x, dummy_y, likelihood_gp).to(device)
-
-    # Use whatever checkpoint path you saved the GP in
-    gp_ckpt_path = checkpoints_dir_gp / "sensor_history_gp.pth" 
-    if gp_ckpt_path.exists():
-        state_dict = torch.load(gp_ckpt_path, map_location=device)
+    if Path(CHECKPOINT_PATHS["gp"]).exists():
+        state_dict = torch.load(str(CHECKPOINT_PATHS["gp"]), map_location=device)
         model_gp.load_state_dict(state_dict['model_state_dict'])
         likelihood_gp.load_state_dict(state_dict['likelihood_state_dict'])
-        print("Loaded GP Weights successfully!")
-    else:
-        print(f"[!] Warning: GP checkpoint not found at {gp_ckpt_path}! Using untrained weights.")
-
+        print("Loaded GP weights.")
     model_gp.eval()
     likelihood_gp.eval()
 
-    # 9A. Single Batch Grid (2x3 Plot)
-    plot_non_mc_batch_diagnostics(
-        model=model_gp, 
-        test_dataset=test_dataset, 
-        spatiotemporal_test_collate_fn=unified_test_collate_fn, 
-        mesh_coordinates_norm=mesh_coordinates_norm, 
-        fixed_sens=fixed_sens, 
-        Yh=Yh, 
-        USE_MU=USE_MU,
-        device=device, 
-        logs_dir=logs_dir / "logs_gp",
-        is_probabilistic=True,
-        model_format="gp",              # <--- Important!
-        likelihood=likelihood_gp,       # <--- Pass the likelihood
-        y_mean=y_mean, y_std=y_std      # <--- Pass the normalizers
-    )
-
     # ==============================================================================
-    # 10. SHRED (Deterministic)
-    # ==============================================================================
-    print("\nRunning SHRED Evaluation...")
-    
-    # SHRED requires the POD basis matrix V to decode its output back to the spatial field.
-    kstate = 100  # Number of POD modes
-    
-    try:
-        from utils.models import SHRED
-        
-        print(f"Computing manual POD basis matrix (V) for top {kstate} modes...")
-        # Flatten time and batch dimensions into a single Snapshot Matrix
-        Ytrain_flat = Ytrain.reshape(-1, nstate).to(device)
-        
-        # Manually compute POD via low-rank SVD (Y = U * S * V^T)
-        # V returned by PyTorch has shape (nstate, kstate)
-        U, S, V = torch.svd_lowrank(Ytrain_flat, q=kstate)
-        
-        # Transpose to (kstate, nstate) for easy decoding: (Batch, kstate) @ (kstate, nstate)
-        V_matrix = V.T 
-
-        # Initialize base SHRED model
-        shred_base = SHRED(
-            len(fixed_sens) + (3 if USE_MU else 0), # in_dim
-            kstate,                                 # out_dim
-            hidden_size=64, 
-            hidden_layers=2, 
-            decoder_sizes=[350, 400], 
-            dropout=0.1
-        ).to(device)
-        
-        best_path_shred = checkpoints_dir_shred / "best_model.pt"
-        if best_path_shred.exists():
-            shred_base.load_state_dict(torch.load(best_path_shred, map_location=device))
-            print("Loaded SHRED weights successfully!")
-        else:
-            print(f"[!] WARNING: Model checkpoint not found at {best_path_shred}!")
-            
-        shred_base.eval()
-
-        # Wrap SHRED so it cleanly ignores the DON relative time shift and projects via V
-        class SHREDWrapper(nn.Module):
-            def __init__(self, shred_model, V_matrix, use_mu):
-                super().__init__()
-                self.shred = shred_model
-                self.V = V_matrix
-                self.use_mu = use_mu
-                
-            def forward(self, sensor_history, coords):
-                # sensor_history shape: (Batch, History_Len, Sensors + Time + Params)
-                nsens = len(fixed_sens)
-                sensors = sensor_history[:, :, :nsens]
-                if self.use_mu:
-                    mu = sensor_history[:, :, -3:]
-                    shred_in = torch.cat([sensors, mu], dim=-1)
-                else:
-                    shred_in = sensors
-                    
-                # Predict POD coefficients (Batch, kstate)
-                pod_coeffs = self.shred(shred_in)
-                
-                # Reconstruct full spatial state (Batch, nstate)
-                pred_state = torch.matmul(pod_coeffs, self.V)
-                
-                return pred_state.unsqueeze(-1)
-
-        model_shred = SHREDWrapper(shred_base, V_matrix, USE_MU).to(device)
-        model_shred.eval()
-
-        # 10A. Single Batch Grid (1x3 Plot for deterministic)
-        plot_non_mc_batch_diagnostics(
-            model=model_shred, 
-            test_dataset=test_dataset, 
-            spatiotemporal_test_collate_fn=unified_test_collate_fn, 
-            mesh_coordinates_norm=mesh_coordinates_norm, 
-            fixed_sens=fixed_sens, 
-            Yh=Yh, 
-            USE_MU=USE_MU,
-            device=device, 
-            logs_dir=logs_dir / "logs_shred",
-            is_probabilistic=False,
-            model_format="don"  # Passes sensor_history correctly
-        )
-    except ImportError:
-        print("[!] Could not import SHRED from utils.models. Skipping SHRED.")
-        model_shred = None
-
-    # ==============================================================================
-    # 11. DIRECT MODEL COMPARISON: ANP vs LNP vs Prob-DeepONet vs DeepONet
+    # 9. RUN COMPARISON BENCHMARK (All Models, Lag 19)
     # ==============================================================================
     print("\n" + "="*60)
-    print("RUNNING DIRECT COMPARISON (All Sensors, Lag 19)")
+    print("RUNNING DIRECT COMPARISON ON KAGGLE (Lag 19)")
     print("="*60)
 
     ll_dict_cmp, se_dict_cmp, sse_dict_cmp, mse_dict_cmp = {}, {}, {}, {}
     max_lag = 19
-    
-    # 1. Evaluate ANP
-    print("  Evaluating ANP...")
-    METHOD_STYLES["ANP"] = {"color": "#E63946", "linestyle": "-", "linewidth": 2.2, "alpha": 0.85}
+
+    # 1. ANP
     ll, se, sse, mse = evaluate_scenario(
         model=model_anp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
@@ -1450,9 +667,7 @@ def main():
     )
     ll_dict_cmp["ANP"], se_dict_cmp["ANP"], sse_dict_cmp["ANP"], mse_dict_cmp["ANP"] = ll, se, sse, mse
 
-    # 2. Evaluate LNP
-    print("  Evaluating LNP...")
-    METHOD_STYLES["LNP"] = {"color": "#457B9D", "linestyle": "-", "linewidth": 2.2, "alpha": 0.85}
+    # 2. LNP
     ll, se, sse, mse = evaluate_scenario(
         model=model_lnp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
@@ -1460,9 +675,7 @@ def main():
     )
     ll_dict_cmp["LNP"], se_dict_cmp["LNP"], sse_dict_cmp["LNP"], mse_dict_cmp["LNP"] = ll, se, sse, mse
 
-    # 3. Evaluate Probabilistic DeepONet
-    print("  Evaluating Prob-DeepONet...")
-    METHOD_STYLES["Prob-DeepONet"] = {"color": "#2A9D8F", "linestyle": "-.", "linewidth": 2.2, "alpha": 0.85}
+    # 3. Prob-DeepONet
     ll, se, sse, mse = evaluate_scenario(
         model=model_probdeeponet, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
@@ -1470,18 +683,15 @@ def main():
     )
     ll_dict_cmp["Prob-DeepONet"], se_dict_cmp["Prob-DeepONet"], sse_dict_cmp["Prob-DeepONet"], mse_dict_cmp["Prob-DeepONet"] = ll, se, sse, mse
 
-    # 4. Evaluate Standard (Deterministic) DeepONet
-    print("  Evaluating DeepONet (Deterministic)...")
-    METHOD_STYLES["DeepONet"] = {"color": "#E9C46A", "linestyle": ":", "linewidth": 2.2, "alpha": 0.85} # Unique style
+    # 4. DeepONet (Deterministic)
     ll, se, sse, mse = evaluate_scenario(
         model=model_don, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
         sensors_to_use=fixed_sens, drop_options=[0], is_mc=False, model_format="don"
     )
-    
-    # 5. Evaluate Context-Conditioned GP
-    print("  Evaluating Context-GP...")
-    METHOD_STYLES["Context-GP"] = {"color": "#F4A261", "linestyle": "-", "linewidth": 2.2, "alpha": 0.85}
+    se_dict_cmp["DeepONet"], mse_dict_cmp["DeepONet"] = se, mse
+
+    # 5. Context-Conditioned GP
     ll, se, sse, mse = evaluate_scenario(
         model=model_gp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
@@ -1492,28 +702,11 @@ def main():
     se_dict_cmp["Context-GP"] = se
     sse_dict_cmp["Context-GP"] = sse
     mse_dict_cmp["Context-GP"] = mse
-    
-    # 6. Evaluate SHRED
-    if 'model_shred' in locals() and model_shred is not None:
-        print("  Evaluating SHRED (Deterministic)...")
-        METHOD_STYLES["SHRED"] = {"color": "#8338EC", "linestyle": ":", "linewidth": 2.2, "alpha": 0.85}
-        ll, se, sse, mse = evaluate_scenario(
-            model=model_shred, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
-            mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
-            sensors_to_use=fixed_sens, drop_options=[0], is_mc=False, model_format="don"
-        )
-        # Note: Skip LL and SSE for SHRED because it is deterministic!
-        se_dict_cmp["SHRED"], mse_dict_cmp["SHRED"] = se, mse
-    
-    # NOTE: We intentionally skip adding DeepONet to ll_dict_cmp and sse_dict_cmp!
-    # Because it is deterministic, it has no variance, making LL and SSE invalid.
-    se_dict_cmp["DeepONet"], mse_dict_cmp["DeepONet"] = se, mse
 
-    # 5. Generate the Unified Plot
-    print("Saving comparison diagnostics plot...")
+    # Generate Final Plot
     cmp_out_path = logs_dir / "diagnostics_comparison_all_sensors_lag19.png"
     plot_all_distributions(ll_dict_cmp, se_dict_cmp, sse_dict_cmp, mse_dict_cmp, out_path=cmp_out_path)
-    
+    print(f"\nSaved final comparison plot to: {cmp_out_path}")
 
 if __name__ == "__main__":
     main()
