@@ -1024,10 +1024,12 @@ def main():
     # 9. CONTEXT GP
     # ==============================================================================
     print("\nInitializing Context-GP...")
+    # Il checkpoint salvato per il GP ha sempre 6 dimensioni (mu_0, mu_1, mu_2, time, x, y)
+    gp_in_dim = 6
     likelihood_gp = gpytorch.likelihoods.GaussianLikelihood().to(device)
-    dummy_x = torch.zeros(2, x_dim).to(device)
+    dummy_x = torch.zeros(2, gp_in_dim).to(device)
     dummy_y = torch.zeros(2).to(device)
-    model_gp = ContextConditionedGP(dummy_x, dummy_y, likelihood_gp, in_dim=x_dim).to(device)
+    model_gp = ContextConditionedGP(dummy_x, dummy_y, likelihood_gp, in_dim=gp_in_dim).to(device)
     if Path(CHECKPOINT_PATHS["gp"]).exists():
         state_dict = torch.load(str(CHECKPOINT_PATHS["gp"]), map_location=device)
         model_gp.load_state_dict(state_dict['model_state_dict'])
@@ -1036,9 +1038,12 @@ def main():
     model_gp.eval()
     likelihood_gp.eval()
 
+    # Creazione dataset dedicato con MU garantito per il GP
+    gp_dataset = SpatiotemporalDataset(Ytest, MUtest)
+
     plot_non_mc_batch_diagnostics(
-        model=model_gp, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
-        mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=TRUE,
+        model=model_gp, test_dataset=gp_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
+        mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=True,
         device=device, logs_dir=logs_dir / "logs_gp", is_probabilistic=True, model_format="gp",
         likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std
     )
