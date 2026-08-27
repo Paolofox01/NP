@@ -666,7 +666,12 @@ def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_colla
         y_target_cpu = y_target.squeeze(-1).cpu()
 
         for batch_idx in range(len(test_indices)):
-            context = x_context[batch_idx].cpu()[:, 4:6] if USE_MU else (x_context[batch_idx].cpu()[:, 1:3] if model_format == "gp" else mesh_coordinates_norm[fixed_sens].cpu())
+            if model_format == "don":
+                context = mesh_coordinates_norm[fixed_sens].cpu()
+            elif USE_MU:
+                context = x_context[batch_idx].cpu()[:, 4:6]
+            else:
+                context = x_context[batch_idx].cpu()[:, 1:3]
             sample_pred = y_pred[batch_idx]
             sample_target = y_target_cpu[batch_idx]
             sample_sq_error = (sample_pred - sample_target) ** 2
@@ -717,13 +722,14 @@ def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_colla
 
 def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, device, time_idx, lag, sensors_to_use, drop_options, mc_samples=100, is_mc=True, model_format="np", likelihood=None, y_mean=None, y_std=None, use_mu=False):
     all_ll, all_se, all_sse, all_mse = [], [], [], []
+    collate_use_mu = True if model_format == "gp" else use_mu
 
     for idx in range(len(dataset)):
         test_batch = [dataset[idx]]
         x_c, y_c, x_t, y_t = spatiotemporal_test_collate_fn(
             test_batch, mesh_coords=mesh_coordinates_norm, fixed_sensor_locations=sensors_to_use,
             use_all_sensors=True, drop_random_sensors_options=drop_options, time_idx=time_idx, lag=lag,
-            use_mu=use_mu, model_format="np" if model_format == "gp" else model_format 
+            use_mu=collate_use_mu, model_format="np" if model_format == "gp" else model_format 
         )
 
         x_c, x_t, y_t = x_c.to(device), x_t.to(device), y_t.to(device)
@@ -733,6 +739,11 @@ def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coord
             if model_format == "gp":
                 x_ctx, y_ctx, x_tgt = x_c[0], y_c[0].squeeze(-1), x_t[0]
                 y_true = y_t[0].squeeze(-1).cpu()
+                if x_ctx.size(-1) != model.covar_module.base_kernel.ard_num_dims:
+                    raise ValueError(
+                        f"Context-GP expects {model.covar_module.base_kernel.ard_num_dims} input features, "
+                        f"but received {x_ctx.size(-1)}."
+                    )
 
                 if y_mean is not None: y_ctx = (y_ctx - y_mean) / y_std
 
@@ -915,7 +926,7 @@ def main():
         ll, se, sse, mse = evaluate_scenario(
             model=model_anp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
             mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=lag,
-            sensors_to_use=fixed_sens, drop_options=[0]
+            sensors_to_use=fixed_sens, drop_options=[0], use_mu=USE_MU
         )
         ll_dict_A_anp[label], se_dict_A_anp[label], sse_dict_A_anp[label], mse_dict_A_anp[label] = ll, se, sse, mse
 
@@ -935,7 +946,7 @@ def main():
         ll, se, sse, mse = evaluate_scenario(
             model=model_anp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
             mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=9,
-            sensors_to_use=sens_list, drop_options=[0], mc_samples=100
+            sensors_to_use=sens_list, drop_options=[0], mc_samples=100, use_mu=USE_MU
         )
         ll_dict_B_anp[label], se_dict_B_anp[label], sse_dict_B_anp[label], mse_dict_B_anp[label] = ll, se, sse, mse
 
@@ -970,7 +981,7 @@ def main():
         ll, se, sse, mse = evaluate_scenario(
             model=model_lnp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
             mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=lag,
-            sensors_to_use=fixed_sens, drop_options=[0]
+            sensors_to_use=fixed_sens, drop_options=[0], use_mu=USE_MU
         )
         ll_dict_A_lnp[label], se_dict_A_lnp[label], sse_dict_A_lnp[label], mse_dict_A_lnp[label] = ll, se, sse, mse
 
@@ -984,7 +995,7 @@ def main():
         ll, se, sse, mse = evaluate_scenario(
             model=model_lnp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
             mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=9,
-            sensors_to_use=sens_list, drop_options=[0], mc_samples=100
+            sensors_to_use=sens_list, drop_options=[0], mc_samples=100, use_mu=USE_MU
         )
         ll_dict_B_lnp[label], se_dict_B_lnp[label], sse_dict_B_lnp[label], mse_dict_B_lnp[label] = ll, se, sse, mse
 
@@ -1142,7 +1153,7 @@ def main():
     ll, se, sse, mse = evaluate_scenario(
         model=model_anp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
-        sensors_to_use=fixed_sens, drop_options=[0], is_mc=True, model_format="np"
+        sensors_to_use=fixed_sens, drop_options=[0], is_mc=True, model_format="np", use_mu=USE_MU
     )
     ll_dict_cmp["ANP"], se_dict_cmp["ANP"], sse_dict_cmp["ANP"], mse_dict_cmp["ANP"] = ll, se, sse, mse
 
@@ -1151,7 +1162,7 @@ def main():
     ll, se, sse, mse = evaluate_scenario(
         model=model_lnp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
-        sensors_to_use=fixed_sens, drop_options=[0], is_mc=True, model_format="np"
+        sensors_to_use=fixed_sens, drop_options=[0], is_mc=True, model_format="np", use_mu=USE_MU
     )
     ll_dict_cmp["LNP"], se_dict_cmp["LNP"], sse_dict_cmp["LNP"], mse_dict_cmp["LNP"] = ll, se, sse, mse
 
@@ -1160,7 +1171,7 @@ def main():
     ll, se, sse, mse = evaluate_scenario(
         model=model_probdeeponet, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
-        sensors_to_use=fixed_sens, drop_options=[0], is_mc=False, model_format="don"
+        sensors_to_use=fixed_sens, drop_options=[0], is_mc=False, model_format="don", use_mu=USE_MU
     )
     ll_dict_cmp["Prob-DeepONet"], se_dict_cmp["Prob-DeepONet"], sse_dict_cmp["Prob-DeepONet"], mse_dict_cmp["Prob-DeepONet"] = ll, se, sse, mse
 
@@ -1169,17 +1180,17 @@ def main():
     ll, se, sse, mse = evaluate_scenario(
         model=model_don, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
-        sensors_to_use=fixed_sens, drop_options=[0], is_mc=False, model_format="don"
+        sensors_to_use=fixed_sens, drop_options=[0], is_mc=False, model_format="don", use_mu=USE_MU
     )
     se_dict_cmp["DeepONet"], mse_dict_cmp["DeepONet"] = se, mse
 
     # Context-Conditioned GP
     print("  Evaluating Context-GP...")
     ll, se, sse, mse = evaluate_scenario(
-        model=model_gp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
+        model=model_gp, dataset=gp_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
         sensors_to_use=fixed_sens, drop_options=[0], is_mc=False, model_format="gp",
-        likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std
+        likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std, use_mu=True
     )
     ll_dict_cmp["Context-GP"] = ll
     se_dict_cmp["Context-GP"] = se
