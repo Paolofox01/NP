@@ -56,7 +56,7 @@ if IS_KAGGLE:
         "deeponet_no_mu": KAGGLE_NB1 / "checkpoints_pinball_don_det_without_mu/best_model.pt",
         "gp": BASE_DATA_DIR / "sensor_history_gp.pth",
         "shred_mu": BASE_DATA_DIR / "Pinball_shred_fixedsensors.pt",   
-        "shred_no_mu": BASE_DATA_DIR / "shred_model_weights.pt",       
+        "shred_no_mu": BASE_DATA_DIR / "shred_model_weights.pth",       
     }
 else:
     SCRIPT_DIR = Path(__file__).resolve().parent
@@ -75,7 +75,8 @@ else:
         "probdeeponet": SCRIPT_DIR / f"checkpoints_pinball_fc_baseline_{'with_mu' if USE_MU else 'without_mu'}/best_model.pt",
         "deeponet": SCRIPT_DIR / f"checkpoints_pinball_don_det_{'with_mu' if USE_MU else 'without_mu'}/best_model.pt",
         "gp": SCRIPT_DIR / "checkpoints_pinball_gp_lag_20/sensor_history_gp.pth",
-        "shred": SCRIPT_DIR / f"checkpoints_pinball_shred_{'with_mu' if USE_MU else 'without_mu'}_lag_20/best_model.pt",
+        "shred_mu": SCRIPT_DIR / "checkpoints_pinball_shred_with_mu_lag_20/best_model.pt",
+        "shred_no_mu": SCRIPT_DIR / "checkpoints_pinball_shred_without_mu_lag_20/best_model.pt",
     }
 
 
