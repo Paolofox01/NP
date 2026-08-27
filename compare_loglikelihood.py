@@ -55,7 +55,8 @@ if IS_KAGGLE:
         "deeponet_mu": KAGGLE_NB1 / "checkpoints_pinball_don_det_with_mu/best_model.pt",
         "deeponet_no_mu": KAGGLE_NB1 / "checkpoints_pinball_don_det_without_mu/best_model.pt",
         "gp": BASE_DATA_DIR / "sensor_history_gp.pth",
-        "shred": BASE_DATA_DIR / "Pinball_shred_fixedsensors.pt",        
+        "shred_mu": BASE_DATA_DIR / "Pinball_shred_fixedsensors.pt",   
+        "shred_no_mu": BASE_DATA_DIR / "shred_model_weights.pt",       
     }
 else:
     SCRIPT_DIR = Path(__file__).resolve().parent
@@ -713,7 +714,7 @@ def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_colla
             plt.savefig(logs_dir / f"multiplot_grid_{grid_suffix}_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
             plt.close(fig)
 
-def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, device, time_idx, lag, sensors_to_use, drop_options, mc_samples=100, is_mc=True, model_format="np", likelihood=None, y_mean=None, y_std=None):
+def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, device, time_idx, lag, sensors_to_use, drop_options, mc_samples=100, is_mc=True, model_format="np", likelihood=None, y_mean=None, y_std=None, use_mu=False):
     all_ll, all_se, all_sse, all_mse = [], [], [], []
 
     for idx in range(len(dataset)):
@@ -721,7 +722,7 @@ def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coord
         x_c, y_c, x_t, y_t = spatiotemporal_test_collate_fn(
             test_batch, mesh_coords=mesh_coordinates_norm, fixed_sensor_locations=sensors_to_use,
             use_all_sensors=True, drop_random_sensors_options=drop_options, time_idx=time_idx, lag=lag,
-            model_format="np" if model_format == "gp" else model_format 
+            use_mu=use_mu, model_format="np" if model_format == "gp" else model_format 
         )
 
         x_c, x_t, y_t = x_c.to(device), x_t.to(device), y_t.to(device)
@@ -1052,16 +1053,35 @@ def main():
     # 10. SHRED (DETERMINISTIC)
     # ==============================================================================
     print("\nRunning SHRED Evaluation...")
-    kstate = 100
     try:
         from LNP.models import SHRED
-        
+
+        shred_key = "shred_mu" if USE_MU else "shred_no_mu"
+        shred_ckpt = CHECKPOINT_PATHS.get(shred_key, CHECKPOINT_PATHS.get("shred"))
+        if shred_ckpt is None or not Path(shred_ckpt).exists():
+            raise FileNotFoundError(f"SHRED checkpoint not found: {shred_ckpt}")
+
+        shred_state = torch.load(str(shred_ckpt), map_location=device)
+        if isinstance(shred_state, dict) and "model_state_dict" in shred_state:
+            shred_state = shred_state["model_state_dict"]
+        elif isinstance(shred_state, dict) and "state_dict" in shred_state:
+            shred_state = shred_state["state_dict"]
+
+        shred_input_size = shred_state["lstm.weight_ih_l0"].shape[1]
+        kstate = shred_state["decoder.6.weight"].shape[0]
+        expected_input_size = len(fixed_sens) + (3 if USE_MU else 0)
+        if shred_input_size != expected_input_size:
+            raise ValueError(
+                f"SHRED checkpoint expects {shred_input_size} features, but USE_MU={USE_MU} "
+                f"provides {expected_input_size}."
+            )
+
         Ytrain_flat = Ytrain.reshape(-1, nstate).to(device)
         U, S, V = torch.svd_lowrank(Ytrain_flat, q=kstate)
         V_matrix = V.T
 
         shred_base = SHRED(
-            len(fixed_sens) + (3 if USE_MU else 0),
+            shred_input_size,
             kstate,
             hidden_size=64,
             hidden_layers=2,
@@ -1069,12 +1089,8 @@ def main():
             dropout=0.1
         ).to(device)
 
-        shred_ckpt = CHECKPOINT_PATHS.get("shred")
-        if shred_ckpt and Path(shred_ckpt).exists():
-            shred_base.load_state_dict(torch.load(str(shred_ckpt), map_location=device))
-            print("Loaded SHRED weights successfully!")
-        else:
-            print(f"[!] WARNING: Model checkpoint not found at {shred_ckpt}!")
+        shred_base.load_state_dict(shred_state)
+        print(f"Loaded SHRED weights successfully: {shred_ckpt}")
             
         shred_base.eval()
 
@@ -1175,7 +1191,7 @@ def main():
         ll, se, sse, mse = evaluate_scenario(
             model=model_shred, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
             mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
-            sensors_to_use=fixed_sens, drop_options=[0], is_mc=False, model_format="don"
+            sensors_to_use=fixed_sens, drop_options=[0], is_mc=False, model_format="don", use_mu=USE_MU
         )
         se_dict_cmp["SHRED"], mse_dict_cmp["SHRED"] = se, mse
 
