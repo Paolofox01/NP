@@ -70,10 +70,14 @@ else:
         "data": resolve_pinball_asset(SCRIPT_DIR, "Pinball_data.npz"),
         "fixed_sensors": resolve_pinball_asset(SCRIPT_DIR, "Pinball_idx_fixedsensors.pt"),
         
-        "anp": SCRIPT_DIR / f"checkpoints_pinball_{'mu' if USE_MU else 'no_mu'}_new_5sens/best_model.pt",
-        "lnp": SCRIPT_DIR / f"checkpoints_pinball_{'mu' if USE_MU else 'no_mu'}_3/best_model.pt",
-        "probdeeponet": SCRIPT_DIR / f"checkpoints_pinball_fc_baseline_{'with_mu' if USE_MU else 'without_mu'}/best_model.pt",
-        "deeponet": SCRIPT_DIR / f"checkpoints_pinball_don_det_{'with_mu' if USE_MU else 'without_mu'}/best_model.pt",
+        "anp_mu": SCRIPT_DIR / "checkpoints_pinball_mu_new_5sens/best_model.pt",
+        "anp_no_mu": SCRIPT_DIR / "checkpoints_pinball_no_mu_new_5sens/best_model.pt",
+        "lnp_mu": SCRIPT_DIR / "checkpoints_pinball_mu_3/best_model.pt",
+        "lnp_no_mu": SCRIPT_DIR / "checkpoints_pinball_no_mu_3/best_model.pt",
+        "probdeeponet_mu": SCRIPT_DIR / "checkpoints_pinball_fc_baseline_with_mu/best_model.pt",
+        "probdeeponet_no_mu": SCRIPT_DIR / "checkpoints_pinball_fc_baseline_without_mu/best_model.pt",
+        "deeponet_mu": SCRIPT_DIR / "checkpoints_pinball_don_det_with_mu/best_model.pt",
+        "deeponet_no_mu": SCRIPT_DIR / "checkpoints_pinball_don_det_without_mu/best_model.pt",
         "gp": SCRIPT_DIR / "checkpoints_pinball_gp_lag_20/sensor_history_gp.pth",
         "shred_mu": SCRIPT_DIR / "checkpoints_pinball_shred_with_mu_lag_20/best_model.pt",
         "shred_no_mu": SCRIPT_DIR / "checkpoints_pinball_shred_without_mu_lag_20/best_model.pt",
@@ -799,13 +803,13 @@ def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coord
 # ============================================================
 # 5. MAIN EXECUTION
 # ============================================================
-def main():
-    USE_MU = False  # Impostare su True per modelli condizionati con parametri mu
+def main(USE_MU):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Running on: {device} | Kaggle Environment: {IS_KAGGLE}")
+    mode_name = "with_mu" if USE_MU else "without_mu"
+    print(f"Running {mode_name} on: {device} | Kaggle Environment: {IS_KAGGLE}")
 
     # Creazione cartelle logs
-    logs_dir = OUTPUT_LOGS_DIR
+    logs_dir = OUTPUT_LOGS_DIR / mode_name
     logs_dir.mkdir(parents=True, exist_ok=True)
     for sub in ["logs_anp", "logs_lnp", "logs_deeponet", "logs_shred", "logs_gp", "logs_probdeeponet"]:
         (logs_dir / sub).mkdir(parents=True, exist_ok=True)
@@ -861,10 +865,10 @@ def main():
     n_hidden = 2
 
     # Risoluzione chiavi checkpoint
-    anp_key = "anp_mu" if (IS_KAGGLE and USE_MU) else ("anp_no_mu" if IS_KAGGLE else "anp")
-    lnp_key = "lnp_mu" if (IS_KAGGLE and USE_MU) else ("lnp_no_mu" if IS_KAGGLE else "lnp")
-    probdon_key = "probdeeponet_mu" if (IS_KAGGLE and USE_MU) else ("probdeeponet_no_mu" if IS_KAGGLE else "probdeeponet")
-    don_key = "deeponet_mu" if (IS_KAGGLE and USE_MU) else ("deeponet_no_mu" if IS_KAGGLE else "deeponet")
+    anp_key = "anp_mu" if USE_MU else "anp_no_mu"
+    lnp_key = "lnp_mu" if USE_MU else "lnp_no_mu"
+    probdon_key = "probdeeponet_mu" if USE_MU else "probdeeponet_no_mu"
+    don_key = "deeponet_mu" if USE_MU else "deeponet_no_mu"
 
     # ==============================================================================
     # 4. PLOT GROUND TRUTH CON POSIZIONE SENSORI
@@ -1213,4 +1217,5 @@ def main():
     print(f"\nSaved final comparison plot to: {cmp_out_path}")
 
 if __name__ == "__main__":
-    main()
+    main(USE_MU=False)
+    main(USE_MU=True)
