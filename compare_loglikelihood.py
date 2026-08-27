@@ -1054,7 +1054,7 @@ def main():
     print("\nRunning SHRED Evaluation...")
     kstate = 100
     try:
-        from utils.models import SHRED
+        from LNP.models import SHRED
         
         Ytrain_flat = Ytrain.reshape(-1, nstate).to(device)
         U, S, V = torch.svd_lowrank(Ytrain_flat, q=kstate)

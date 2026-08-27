@@ -1186,8 +1186,8 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONE
 
         fig.tight_layout(pad=3.0)
         plt.subplots_adjust(hspace=0.4, wspace=0.25)
-        plt.show()
         fig.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.show()
 
     # --- Reusable Evaluation Engine (Without Un-normalization) ---
     def evaluate_scenario(dataset, time_idx, lag, sensors_to_use, drop_options, mc_samples=100):
@@ -1347,8 +1347,8 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONE
     ax.set_ylabel("Y Coordinate")
 
     plt.tight_layout()
-    plt.show()
     fig.savefig(logs_dir / "ground_truth_sensors.png", dpi=300, bbox_inches="tight")
+    plt.show()
 
 def main():
     for USE_MU in [True, False]:

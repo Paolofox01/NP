@@ -437,9 +437,9 @@ class ConvCNP(nn.Module):
         # 3D    -> (B, C, num_target, 1, 1)
 
         # Flatten the trailing spatial dimensions dynamically:
+        batch_size, num_target, _ = x_target.shape
         sampled = sampled.view(batch_size, grid_out.size(1), num_target)
         sampled = sampled.permute(0, 2, 1)
-        batch_size, num_target, _ = sampled.shape
 
         if self.time_basis_size > 0:
             if t_target is None:

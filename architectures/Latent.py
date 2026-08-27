@@ -55,21 +55,21 @@ class Latent(nn.Module):
         
         self.latent = nn.Sequential(*layers)
         
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Transform representation to latent distribution and sample.
+        Transform a representation into latent distribution parameters.
         
-        Uses the reparameterization trick to sample from a Gaussian distribution
-        parameterized by the network output.
+        Sampling via the reparameterization trick is performed by the calling
+        latent NP model after it transforms the raw variance coefficient.
         
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, r_dim).
             
         Returns:
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple containing:
-                - z: Sampled latent tensor of shape (batch_size, z_dim)
-                - mu: Mean of latent distribution of shape (batch_size, z_dim)
-                - log_var: Log-variance of latent distribution of shape (batch_size, z_dim)
+                        tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+                                - mu: Mean of the latent distribution, shape (batch_size, z_dim)
+                                - raw_variance: Unconstrained variance coefficient, shape
+                                    (batch_size, z_dim)
         """
         
         z_params = self.latent(x)
