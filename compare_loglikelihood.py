@@ -1038,7 +1038,7 @@ def main():
 
     plot_non_mc_batch_diagnostics(
         model=model_gp, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
-        mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
+        mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=TRUE,
         device=device, logs_dir=logs_dir / "logs_gp", is_probabilistic=True, model_format="gp",
         likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std
     )
