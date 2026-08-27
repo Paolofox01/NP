@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from dolfin import *
 
 # Assuming these are available in your local directory structure
-from architectures.Fourier import FourierFeatures, LearnableFourierFeatures
+from architectures.Fourier import LearnableFourierFeatures
 from pinball_paths import resolve_pinball_asset
 from processdata import multiplot, trajectories
 from torch.utils.data import DataLoader, Dataset
@@ -53,7 +53,7 @@ def deeponet_collate_fn(
     points_per_batch=2048,
     use_mu=False
 ):
-    """Builds a batch for the DeepONet Baseline using Relative Time Shift."""
+    """Builds a batch for DeepONet separating dynamic sensors from static parameters."""
     if isinstance(batch[0], (tuple, list)):
         batch_trajs = torch.stack([item[0] for item in batch])
         if use_mu:
@@ -64,52 +64,51 @@ def deeponet_collate_fn(
             raise ValueError("use_mu is True, but the dataset did not return MU.")
     
     batch_size, ntimes_total, nstate = batch_trajs.shape
-    device = batch_trajs.device
+    dev = batch_trajs.device
 
-    # 1. Sample absolute target time indices
-    time_indices = torch.randint(history_length, ntimes_total, (batch_size,), device=device)
+    # 1. Sample target time indices
+    time_indices = torch.randint(history_length - 1, ntimes_total, (batch_size,), device=dev)
 
-    # 2. Extract the sliding window of sensor history
-    offsets = torch.arange(-history_length + 1, 1, device=device)
+    # 2. Extract sliding window of sensor history
+    offsets = torch.arange(-history_length + 1, 1, device=dev)
     time_windows = time_indices.unsqueeze(1) + offsets
-    batch_indices_2d = torch.arange(batch_size, device=device).unsqueeze(1)
+    batch_indices_2d = torch.arange(batch_size, device=dev).unsqueeze(1)
 
     history_states = batch_trajs[batch_indices_2d, time_windows]
     sensor_history_3d = history_states[:, :, fixed_sensor_locations]
 
     # --- RELATIVE TIME SHIFT ---
-    # Branch (History) Time: Negative offsets [-19, ..., 0] normalized
     t_relative = (offsets.float() / float(ntimes_total)).unsqueeze(0).unsqueeze(-1)
     t_repeated = t_relative.expand(batch_size, history_length, -1)
     
-    # Trunk (Target) Time: Always 0.0
-    t_target = torch.zeros((batch_size, 1), dtype=torch.float32, device=device)
+    # Branch only takes sensors + relative time
+    sensor_history = torch.cat([sensor_history_3d, t_repeated], dim=-1)
+
+    # Static parameters extracted at target time index
+    if use_mu:
+        batch_mus = batch_mus.view(batch_size, ntimes_total, -1).to(dev)
+        static_params = batch_mus[torch.arange(batch_size, device=dev), time_indices]
+    else:
+        static_params = None
+
+    # Trunk Target Time: Always 0.0
+    t_target = torch.zeros((batch_size, 1), dtype=torch.float32, device=dev)
     t_expanded = t_target.unsqueeze(1).expand(-1, points_per_batch, -1)
 
-    if use_mu:
-        batch_mus = batch_mus.to(device)
-        mu_history = batch_mus[batch_indices_2d, time_windows]
-        sensor_history = torch.cat([sensor_history_3d, t_repeated, mu_history], dim=-1)
-    else:
-        sensor_history = torch.cat([sensor_history_3d, t_repeated], dim=-1)
-
-    # 3. Extract the full target mesh state at the target time
-    batch_indices_1d = torch.arange(batch_size, device=device)
-    states_at_t = batch_trajs[batch_indices_1d, time_indices]
+    # 3. Extract target states and sample random spatial points
+    states_at_t = batch_trajs[torch.arange(batch_size, device=dev), time_indices]
+    point_indices = torch.randint(0, nstate, (batch_size, points_per_batch), device=dev)
     
-    # 4. Sample random spatial points for the Trunk network
-    point_indices = torch.randint(0, nstate, (batch_size, points_per_batch), device=device)
-    
-    if mesh_coordinates.device != device:
-        mesh_coordinates = mesh_coordinates.to(device)
+    if mesh_coordinates.device != dev:
+        mesh_coordinates = mesh_coordinates.to(dev)
         
     spatial_coords = mesh_coordinates[point_indices] 
     coords = torch.cat([t_expanded, spatial_coords], dim=-1)
     
-    # 5. Gather the ground truth values
+    # 4. Gather ground truth
     y_target = torch.gather(states_at_t, 1, point_indices)
     
-    return sensor_history, coords, y_target
+    return sensor_history, static_params, coords, y_target
 
 
 def build_don_eval_inputs(
@@ -129,34 +128,36 @@ def build_don_eval_inputs(
         batch_mus = None
 
     batch_size, _, nstate = batch_trajs.shape
-    device = batch_trajs.device
+    dev = batch_trajs.device
 
-    time_window = torch.arange(time_idx - history_length + 1, time_idx + 1, device=device)
+    time_window = torch.arange(time_idx - history_length + 1, time_idx + 1, device=dev)
     history_states = batch_trajs[:, time_window]
     sensor_history_3d = history_states[:, :, fixed_sensor_locations]
 
-    offsets = torch.arange(-history_length + 1, 1, device=device)
+    offsets = torch.arange(-history_length + 1, 1, device=dev)
     t_relative = (offsets.float() / float(ntimes)).unsqueeze(0).unsqueeze(-1)
     t_repeated = t_relative.expand(batch_size, history_length, -1)
 
-    if use_mu:
-        batch_mus = batch_mus.to(device)
-        mu_history = batch_mus[:, time_window]
-        sensor_history = torch.cat([sensor_history_3d, t_repeated, mu_history], dim=-1)
-    else:
-        sensor_history = torch.cat([sensor_history_3d, t_repeated], dim=-1)
+    sensor_history = torch.cat([sensor_history_3d, t_repeated], dim=-1)
 
-    t_target = torch.zeros((batch_size, 1), dtype=torch.float32, device=device)
+    if use_mu and batch_mus is not None:
+        batch_mus = batch_mus.view(batch_size, ntimes, -1).to(dev)
+        static_params = batch_mus[:, time_idx]
+    else:
+        static_params = None
+
+    t_target = torch.zeros((batch_size, 1), dtype=torch.float32, device=dev)
     t_expanded = t_target.unsqueeze(1).expand(-1, nstate, -1)
 
-    if mesh_coordinates.device != device:
-        mesh_coordinates = mesh_coordinates.to(device)
+    if mesh_coordinates.device != dev:
+        mesh_coordinates = mesh_coordinates.to(dev)
 
     spatial_coords = mesh_coordinates.unsqueeze(0).expand(batch_size, -1, -1)
     coords = torch.cat([t_expanded, spatial_coords], dim=-1)
     y_target = batch_trajs[:, time_idx, :]
 
-    return sensor_history, coords, y_target
+    return sensor_history, static_params, coords, y_target
+
 
 # ==============================================================================
 # MODEL DEFINITION (DETERMINISTIC)
@@ -185,14 +186,14 @@ class DeepONetDeterministic(nn.Module):
             dropout=0.1,
         )
 
-        # Branch Head (matching the 2-layer MLP head structure)
+        # Branch Head
         self.branch_head = nn.Sequential(
             nn.Linear(256, 128),
             nn.ReLU(),
             nn.Linear(128, p),
         )
 
-        # 2. Fourier Features (Learnable, matching probabilistic model)
+        # 2. Learnable Fourier Features
         self.fourier_mapping = LearnableFourierFeatures(
             input_dim=coord_dim,
             num_frequencies=num_frequencies,
@@ -208,7 +209,7 @@ class DeepONetDeterministic(nn.Module):
             nn.ReLU(),
         )
 
-        # Trunk Head (matching the 2-layer MLP head structure)
+        # Trunk Head
         self.trunk_head = nn.Sequential(
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -218,10 +219,6 @@ class DeepONetDeterministic(nn.Module):
         self.bias = nn.Parameter(torch.zeros(1))
 
     def forward(self, sensor_history, static_params, coords):
-        # sensor_history: (B, T, num_sensors + 1)
-        # static_params:  (B, num_params) or None
-        # coords:         (B, N, coord_dim)
-
         # 1. Branch Processing
         _, (h_n, _) = self.branch_lstm(sensor_history)
         branch_features = h_n[-1]
@@ -243,6 +240,7 @@ class DeepONetDeterministic(nn.Module):
         pred = torch.sum(branch_out * trunk_out, dim=-1) / math.sqrt(self.p) + self.bias
         return pred
 
+
 # ==============================================================================
 # LOSS & TRAINING UTILS
 # ==============================================================================
@@ -251,13 +249,15 @@ def train_one_DoN_epoch(model, loader, optimizer, device):
     model.train()
     running_mse = 0.0
     
-    for sensors, coords, y_target in loader:
+    for sensors, static_params, coords, y_target in loader:
         sensors = sensors.to(device)
         coords = coords.to(device)
         y_target = y_target.to(device)
+        if static_params is not None:
+            static_params = static_params.to(device)
 
         optimizer.zero_grad()
-        pred = model(sensors, coords)
+        pred = model(sensors, static_params, coords)
         
         loss = F.mse_loss(pred, y_target)
         loss.backward()
@@ -273,12 +273,14 @@ def evaluate_DoN_loss(model, loader, device):
     model.eval()
     running = 0.0
     with torch.no_grad():
-        for sensors, coords, y_target in loader:
+        for sensors, static_params, coords, y_target in loader:
             sensors = sensors.to(device)
             coords = coords.to(device)
             y_target = y_target.to(device)
+            if static_params is not None:
+                static_params = static_params.to(device)
             
-            pred = model(sensors, coords)
+            pred = model(sensors, static_params, coords)
             loss = F.mse_loss(pred, y_target)
             running += loss.item() * sensors.size(0)
     return running / len(loader.dataset)
@@ -288,14 +290,14 @@ def evaluate_DoN_metrics(model, loader, device, max_batches=3):
     abs_errors = []
     rel_errors = []
     with torch.no_grad():
-        for batch_idx, (sensors, coords, y_target) in enumerate(loader):
+        for batch_idx, (sensors, static_params, coords, y_target) in enumerate(loader):
             sensors = sensors.to(device)
             coords = coords.to(device)
             y_target = y_target.to(device)
+            if static_params is not None:
+                static_params = static_params.to(device)
             
-            pred_norm = model(sensors, coords)
-
-            pred = pred_norm
+            pred = model(sensors, static_params, coords)
             target = y_target
             
             abs_error = torch.abs(pred - target)
@@ -360,10 +362,10 @@ def run_experiment(
     batch_size = 16
     collate = partial(
         deeponet_collate_fn, 
-        fixed_sensor_locations=fixed_sens,
-        mesh_coordinates=mesh_coords_tensor,
-        ntimes=ntimes,
-        points_per_batch=2048,
+        fixed_sensor_locations=fixed_sens, 
+        mesh_coordinates=mesh_coords_tensor, 
+        ntimes=ntimes, 
+        points_per_batch=2048, 
         use_mu=use_mu
     )
 
@@ -373,7 +375,7 @@ def run_experiment(
 
     model = DeepONetDeterministic(
         num_sensors=len(fixed_sens), 
-        num_params=nparams if use_mu else 0,
+        num_params=nparams if use_mu else 0, 
         coord_dim=3, 
         p=128
     ).to(device)
@@ -427,7 +429,7 @@ def run_experiment(
     history_length = 20
     time_idx = 30  
     
-    sensor_history, full_coords, y_test_norm = build_don_eval_inputs(
+    sensor_history, static_params, full_coords, y_test_norm = build_don_eval_inputs(
         test_batch,
         fixed_sensor_locations=fixed_sens,
         mesh_coordinates=mesh_coords_tensor,
@@ -438,15 +440,14 @@ def run_experiment(
     )
     sensor_history = sensor_history.to(device)
     full_coords = full_coords.to(device)
-    y_test_norm = y_test_norm.to(device)
+    y_target = y_test_norm.to(device)
+    if static_params is not None:
+        static_params = static_params.to(device)
 
     model.eval()
     with torch.no_grad():
-        pred_norm = model(sensor_history, full_coords)
+        pred = model(sensor_history, static_params, full_coords)
         
-    pred = pred_norm
-    y_target = y_test_norm
-    
     pred_mse = (pred - y_target) ** 2
 
     state_vmin = torch.min(pred.min(), y_target.min()).item()
@@ -536,6 +537,7 @@ def main():
     mesh_coordinates = Yh.tabulate_dof_coordinates()
     sensor_coords = mesh_coordinates[fixed_sens]
 
+    # Raw physical coordinates (no scaling)
     mesh_coords_tensor = torch.tensor(mesh_coordinates, dtype=torch.float32)
 
     for use_mu in [True, False]:
