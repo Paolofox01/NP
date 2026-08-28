@@ -706,8 +706,8 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONE
     epochs_p1 = 500
     
     # 1. Freeze the latent space
-    # for param in model.latent.parameters():
-    #     param.requires_grad = False
+    for param in model.latent.parameters():
+        param.requires_grad = False
         
     # 2. Setup Phase 1 Optimizer (Flat LR: 2e-4, passing only unfrozen parameters)
     optimizer_p1 = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=2e-4, weight_decay=0.0)
