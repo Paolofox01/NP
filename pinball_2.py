@@ -658,11 +658,9 @@ def run_experiment(USE_MU, USE_DEEPONET_DECODER=False):
     print("\n" + "=" * 60)
 
     # =====================================================================
-    # PHASE 1: DETERMINISTIC WARMUP (flat LR, latent frozen, beta = 0)
+    # PHASE 1: RECONSTRUCTION WARMUP (flat LR, beta = 0)
     # =====================================================================
     epochs_p1 = 500
-    for parameter in model.latent.parameters():
-        parameter.requires_grad = False
 
     optimizer_p1 = torch.optim.Adam(
         filter(lambda parameter: parameter.requires_grad, model.parameters()),
@@ -695,7 +693,7 @@ def run_experiment(USE_MU, USE_DEEPONET_DECODER=False):
     torch.save(model.state_dict(), phase1_complete_path)
 
     # =====================================================================
-    # PHASE 2: STOCHASTIC FINE-TUNING (LR decay, latent active, beta ramp)
+    # PHASE 2: STOCHASTIC FINE-TUNING (LR decay, beta ramp)
     # =====================================================================
     epochs_p2 = 2500
     ramp_epochs = 1000

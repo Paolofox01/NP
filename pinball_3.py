@@ -697,7 +697,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONE
     criterion = ELBOLossNP(beta=1.0) # Base criterion (beta overriden by schedules below)
 
     # =====================================================================
-    # PHASE 1: DETERMINISTIC WARMUP (Flat LR, Latent Frozen, Beta = 0)
+    # PHASE 1: RECONSTRUCTION WARMUP (Flat LR, Beta = 0)
     # =====================================================================
     print("\n" + "=" * 60)
     print("PHASE 1: DETERMINISTIC WARMUP (500 Epochs)")
@@ -705,11 +705,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONE
     
     epochs_p1 = 500
     
-    # 1. Freeze the latent space
-    for param in model.latent.parameters():
-        param.requires_grad = False
-        
-    # 2. Setup Phase 1 Optimizer (Flat LR: 2e-4, passing only unfrozen parameters)
+    # 1. Setup Phase 1 Optimizer (Flat LR: 2e-4)
     optimizer_p1 = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=2e-4, weight_decay=0.0)
     
     # 3. Setup Phase 1 Beta Schedule (Strictly 0.0)
@@ -761,7 +757,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONE
     # 1. Reload the best warmup weights (safety net)
     model.load_state_dict(torch.load(phase1_complete_path, map_location=device))
     
-    # 2. Unfreeze the latent space!
+    # 2. Ensure the latent space remains trainable.
     for param in model.latent.parameters():
         param.requires_grad = True
         
