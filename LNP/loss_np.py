@@ -181,8 +181,8 @@ class ELBOLossNP(nn.Module):
             - 1.0
         )
         
-        # Sum latent dimensions, then average across the batch.
-        return kl.sum(dim=-1).mean()
+        # Average over batch and latent dimensions to match the reconstruction scale.
+        return kl.mean()
 
 
 class MSELoss(nn.Module):
