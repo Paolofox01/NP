@@ -606,18 +606,8 @@ def run_experiment(USE_MU, USE_DEEPONET_DECODER=False):
     ).to(device)
     
         
-    num_epochs   = 3000
-    beta_target  = 1.0   # final KL weight — low enough to avoid collapse, high enough to regularise
-    warmup_steps = 1500   # linearly ramp beta from 0 → beta_target over the first 1000 epochs
-    
     # Loss function
     criterion = ELBOLossNP(beta=1.0)
-
-    # Optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=8e-4, weight_decay=0.0)
-
-    # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=128, min_lr=1e-5)
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Beta (KL weight): {criterion.beta}")
@@ -667,50 +657,79 @@ def run_experiment(USE_MU, USE_DEEPONET_DECODER=False):
 
     print("\n" + "=" * 60)
 
-    beta0 = 500
-            
-    if num_epochs > warmup_steps and warmup_steps > beta0:
-        # Build per-epoch beta schedule: linear warmup, then constant
-        beta_schedule = (
-            [0.0] * beta0 +
-            [beta_target * (e / (warmup_steps - beta0)) for e in range(0, warmup_steps - beta0)]   # ramp-up
-            + [beta_target] * (num_epochs - warmup_steps)                      # constant
-        )
-    elif warmup_steps < beta0:
-        beta_schedule = (
-            [beta_target * (e / (warmup_steps)) for e in range(0, warmup_steps)]   # ramp-up
-            + [beta_target] * (num_epochs - warmup_steps)                      # constant
-        )
-    else:
-        beta_schedule = [beta_target] * num_epochs  # constant
-        
-        
-    # best_model_path = checkpoints_dir / "final_model.pt"
-    # checkpoint = torch.load(best_model_path, map_location=device)
-    # if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-    #     model.load_state_dict(checkpoint["model_state_dict"])
-    # else:
-    #     model.load_state_dict(checkpoint)
-    # model.eval()
-    
-    # Train the model using the unified training function
+    # =====================================================================
+    # PHASE 1: DETERMINISTIC WARMUP (flat LR, latent frozen, beta = 0)
+    # =====================================================================
+    epochs_p1 = 500
+    for parameter in model.latent.parameters():
+        parameter.requires_grad = False
+
+    optimizer_p1 = torch.optim.Adam(
+        filter(lambda parameter: parameter.requires_grad, model.parameters()),
+        lr=2e-4,
+        weight_decay=0.0,
+    )
+    p1_checkpoints_dir = checkpoints_dir / "phase1"
+    p1_checkpoints_dir.mkdir(exist_ok=True)
+
+    train_np(
+        train_loader=train_loader,
+        model=model,
+        optimizer=optimizer_p1,
+        loss_fn=criterion,
+        device=device,
+        epochs=epochs_p1,
+        val_loader=val_loader,
+        scheduler=None,
+        gradient_clip=1.0,
+        early_stopping_patience=1000,
+        is_meta_learning=True,
+        verbose=True,
+        print_every=10,
+        checkpoint_dir=str(p1_checkpoints_dir),
+        beta_schedule=[0.0] * epochs_p1,
+        early_stopping_start_epoch=epochs_p1 + 1,
+    )
+
+    phase1_complete_path = checkpoints_dir / "phase1_complete.pt"
+    torch.save(model.state_dict(), phase1_complete_path)
+
+    # =====================================================================
+    # PHASE 2: STOCHASTIC FINE-TUNING (LR decay, latent active, beta ramp)
+    # =====================================================================
+    epochs_p2 = 2500
+    ramp_epochs = 1000
+    beta_target = 1.0
+    model.load_state_dict(torch.load(phase1_complete_path, map_location=device))
+    for parameter in model.latent.parameters():
+        parameter.requires_grad = True
+
+    optimizer_p2 = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
+    scheduler_p2 = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer_p2, mode='min', factor=0.5, patience=256, min_lr=1e-6
+    )
+    beta_schedule_p2 = [beta_target * epoch / ramp_epochs for epoch in range(ramp_epochs)]
+    beta_schedule_p2 += [beta_target] * (epochs_p2 - ramp_epochs)
+    p2_checkpoints_dir = checkpoints_dir / "phase2"
+    p2_checkpoints_dir.mkdir(exist_ok=True)
+
     history = train_np(
         train_loader=train_loader,
         model=model,
-        optimizer=optimizer,
+        optimizer=optimizer_p2,
         loss_fn=criterion,
         device=device,
-        epochs=num_epochs,  # Reduced: 1000 was excessive, monitor for convergence
+        epochs=epochs_p2,
         val_loader=val_loader,
-        scheduler=scheduler,
-        gradient_clip=1.0,  # Gradient clipping for stability
+        scheduler=scheduler_p2,
+        gradient_clip=1.0,
         early_stopping_patience=1000,
-        is_meta_learning=True,  # Enable Neural Process mode
+        is_meta_learning=True,
         verbose=True,
-        print_every=10,  # Print every 10 epochs
-        checkpoint_dir=str(checkpoints_dir),  # Directory to save checkpoints
-        beta_schedule=beta_schedule,
-        early_stopping_start_epoch=200,  # Don't consider early stopping until after 200 epochs
+        print_every=10,
+        checkpoint_dir=str(p2_checkpoints_dir),
+        beta_schedule=beta_schedule_p2,
+        early_stopping_start_epoch=ramp_epochs,
     )
 
     print("\nTraining complete!")
@@ -719,7 +738,7 @@ def run_experiment(USE_MU, USE_DEEPONET_DECODER=False):
     print(f"Final KL divergence: {history['train_kl'][-1]:.4f}")
     print(f"Final reconstruction: {history['train_recon'][-1]:.4f}")
     
-    best_model_path = checkpoints_dir / "best_model.pt"
+    best_model_path = p2_checkpoints_dir / "best_model.pt"
     checkpoint = torch.load(best_model_path, map_location=device)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])

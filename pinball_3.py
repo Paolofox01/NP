@@ -769,7 +769,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONE
     optimizer_p2 = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
     
     # 4. Setup Phase 2 Scheduler (THE DECAY: Cosine curve from 5e-4 down to 1e-6)
-    scheduler_p2 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_p2, mode='min', factor=0.5, patience=128, min_lr=1e-6)
+    scheduler_p2 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_p2, mode='min', factor=0.5, patience=256, min_lr=1e-6)
     
     # 5. Setup Phase 2 Beta Schedule (Ramp up to target, then hold)
     beta_schedule_p2 = [beta_target * (e / ramp_epochs) for e in range(ramp_epochs)] + \
