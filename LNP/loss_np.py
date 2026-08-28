@@ -141,8 +141,8 @@ class ELBOLossNP(nn.Module):
         log_two_pi = torch.log(torch.tensor(2 * torch.pi, device=y_mu.device, dtype=y_mu.dtype))
         nll = 0.5 * (log_two_pi + torch.log(y_var) + mse / y_var)
         
-        # Sum target and output dimensions, then average across the batch.
-        return nll.sum(dim=tuple(range(1, nll.ndim))).mean()
+        # Average over batch, target, and output dimensions.
+        return nll.mean()
     
     def kl_divergence_gaussians(
         self,
