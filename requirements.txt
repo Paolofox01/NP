@@ -6,6 +6,8 @@ torch
 matplotlib
 seaborn
 ipython
+pillow
+torchvision
 
 # Utilities used by the scripts
 scipy
