@@ -15,6 +15,7 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import ListedColormap, BoundaryNorm
 import seaborn as sns
 from torch.utils.data import Dataset, DataLoader
+from sklearn.utils.extmath import randomized_svd
 from dolfin import *
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1117,9 +1118,12 @@ def main(USE_MU):
                 f"provides {expected_input_size}."
             )
 
-        Ytrain_flat = Ytrain.reshape(-1, nstate).to(device)
-        U, S, V = torch.svd_lowrank(Ytrain_flat, q=kstate)
-        V_matrix = V.T
+        # SHRED predicts coefficients in the POD basis used during training.
+        _, _, V_matrix = randomized_svd(
+            Ytrain.reshape(-1, nstate).cpu().numpy(),
+            n_components=kstate,
+        )
+        V_matrix = torch.from_numpy(V_matrix).to(device=device, dtype=Ytrain.dtype)
 
         shred_base = SHRED(
             shred_input_size,

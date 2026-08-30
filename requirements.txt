@@ -1,6 +1,7 @@
 # Core numerical stack
 numpy
 torch
+scikit-learn
 
 # Plotting and notebooks
 matplotlib
