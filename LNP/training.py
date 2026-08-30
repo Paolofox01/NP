@@ -62,6 +62,7 @@ def train_np(
     is_meta_learning: bool = False,
     beta_schedule: Optional[List[float]] = None,
     early_stopping_start_epoch: int = 0,
+    on_epoch_start: Optional[Callable[[int], None]] = None,
 ) -> Dict[str, List[float]]:
     """
     Train a Neural Process or standard model with comprehensive tracking and validation.
@@ -93,6 +94,7 @@ def train_np(
         early_stopping_start_epoch: Do not apply early stopping or update best-model checkpoint
                                     before this epoch (0-indexed). Set to warmup_steps to avoid
                                     premature stopping during KL annealing warmup.
+        on_epoch_start: Optional callback invoked with the zero-indexed epoch before its batches.
         
     Returns:
         Dictionary with training history: {'train_loss', 'val_loss', 'train_metric', 'val_metric'}
@@ -121,6 +123,9 @@ def train_np(
     use_forward_fn = forward_fn is not None
 
     for epoch in range(epochs):
+        if on_epoch_start is not None:
+            on_epoch_start(epoch)
+
         if beta_schedule is not None and has_beta:
             loss_fn.beta = beta_schedule[min(epoch, len(beta_schedule) - 1)]
 
