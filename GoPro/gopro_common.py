@@ -123,23 +123,25 @@ def np_collate_fn(
     batch,
     mesh_coords: torch.Tensor,
     fixed_sensor_locations: list[int],
-    num_target_min: int = 1024,
-    num_target_max: int = 2048,
+    num_target_min: int = 256,
+    num_target_max: int = 512,
     history_options: tuple[int, ...] = (10, 20, 30, 40),
 ):
-    """Create ANP/LNP context-target batches with coordinates [relative_time, row, col]."""
+    """Optimized: Reduced sampling and simplified tensor ops for GPU."""
     windows = _stack_batch(batch)
     batch_size, max_history_plus_one, nstate = windows.shape
     history = int(history_options[torch.randint(len(history_options), ()).item()])
     if history >= max_history_plus_one:
         raise ValueError("Requested GoPro history exceeds the dataset window.")
+    
     sensor_indices = torch.as_tensor(fixed_sensor_locations, dtype=torch.long)
     target_count = min(torch.randint(num_target_min, num_target_max + 1, ()).item(), nstate - len(sensor_indices))
-    remaining = torch.ones(nstate, dtype=torch.bool)
-    remaining[sensor_indices] = False
-    remaining_indices = torch.nonzero(remaining, as_tuple=False).squeeze(1)
-    extra = remaining_indices[torch.randperm(remaining_indices.numel())[:target_count]]
-    target_indices = torch.cat([sensor_indices, extra])
+    
+    # Fast random sampling: avoid nonzero + randperm, use direct randn + argsort
+    random_vals = torch.rand(nstate)
+    random_vals[sensor_indices] = -1  # Exclude sensor locations
+    extra_indices = torch.argsort(random_vals, descending=True)[:target_count]
+    target_indices = torch.cat([sensor_indices, extra_indices])
 
     context_values = windows[:, -(history + 1):, sensor_indices]
     offsets = torch.linspace(-1.0, 0.0, history + 1).repeat_interleave(len(sensor_indices)).unsqueeze(-1)
@@ -237,7 +239,7 @@ def gaussian_nll(mean: torch.Tensor, variance: torch.Tensor, target: torch.Tenso
     return 0.5 * (math.log(2.0 * math.pi) + variance.log() + (target - mean).square() / variance).mean()
 
 
-def make_np_loaders(datasets, coords, sensors, batch_size: int = 16, num_workers: int = 6):
+def make_np_loaders(datasets, coords, sensors, batch_size: int = 32, num_workers: int = 8):
     collate = partial(np_collate_fn, mesh_coords=coords, fixed_sensor_locations=sensors)
     return (
         DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate, 
@@ -247,7 +249,7 @@ def make_np_loaders(datasets, coords, sensors, batch_size: int = 16, num_workers
     )
 
 
-def make_don_loaders(datasets, coords, sensors, batch_size: int = 16, num_workers: int = 6):
+def make_don_loaders(datasets, coords, sensors, batch_size: int = 32, num_workers: int = 8):
     collate = partial(don_collate_fn, mesh_coords=coords, fixed_sensor_locations=sensors)
     return (
         DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate,
