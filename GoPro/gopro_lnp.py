@@ -55,7 +55,7 @@ def main() -> None:
         early_stopping_patience=1000, is_meta_learning=True, verbose=True, print_every=10,
         checkpoint_dir=str(p1_checkpoints_dir), beta_schedule=beta_schedule_p1,
         early_stopping_start_epoch=epochs_p1 + 1,
-        on_epoch_start=lambda _: set_epoch_targets(coords.shape[0], sensors, num_target=2048, history_options=(10, 20, 30, 40)),
+        on_epoch_start=lambda _: set_epoch_targets(coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40)),
     )
     
     phase1_complete_path = checkpoints / "phase1_complete.pt"
@@ -89,7 +89,7 @@ def main() -> None:
         early_stopping_patience=1000, is_meta_learning=True, verbose=True, print_every=10,
         checkpoint_dir=str(p2_checkpoints_dir), beta_schedule=beta_schedule_p2,
         early_stopping_start_epoch=ramp_epochs,
-        on_epoch_start=lambda _: set_epoch_targets(coords.shape[0], sensors, num_target=2048, history_options=(10, 20, 30, 40)),
+        on_epoch_start=lambda _: set_epoch_targets(coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40)),
     )
     
     print("\nTraining completely finished!")

@@ -167,7 +167,6 @@ def set_epoch_targets(nstate: int, fixed_sensor_locations: list[int], num_target
     global _GLOBAL_TARGET_INDICES, _GLOBAL_HISTORY_LENGTH
     _GLOBAL_TARGET_INDICES = build_epoch_target_indices(nstate, fixed_sensor_locations, num_target)
     _GLOBAL_HISTORY_LENGTH = int(history_options[torch.randint(len(history_options), ()).item()])
-    print(f"  → Target indices: {_GLOBAL_TARGET_INDICES.shape[0]} points, History length: {_GLOBAL_HISTORY_LENGTH}")
 
 
 def np_collate_fn(
