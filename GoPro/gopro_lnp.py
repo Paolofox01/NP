@@ -40,10 +40,10 @@ def main() -> None:
     # PHASE 1: DETERMINISTIC WARMUP (Beta = 0)
     # =====================================================================
     print("\n" + "="*60)
-    print("PHASE 1: DETERMINISTIC WARMUP (500 Epochs)")
+    print("PHASE 1: DETERMINISTIC WARMUP (100 Epochs)")
     print("="*60)
     
-    epochs_p1 = 500
+    epochs_p1 = 100
     optimizer_p1 = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=2e-4, weight_decay=0.0)
     beta_schedule_p1 = [0.0] * epochs_p1
     p1_checkpoints_dir = checkpoints / "phase1"
@@ -66,11 +66,11 @@ def main() -> None:
     # PHASE 2: STOCHASTIC FINE-TUNING (Beta Ramp + LR Decay)
     # =====================================================================
     print("\n" + "="*60)
-    print("PHASE 2: STOCHASTIC FINE-TUNING (2500 Epochs)")
+    print("PHASE 2: STOCHASTIC FINE-TUNING (500 Epochs)")
     print("="*60)
     
-    epochs_p2 = 2500
-    ramp_epochs = 1000
+    epochs_p2 = 500
+    ramp_epochs = 200
     beta_target = 1.0
     
     model.load_state_dict(torch.load(phase1_complete_path, map_location=device))

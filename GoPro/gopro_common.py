@@ -154,15 +154,15 @@ def build_epoch_target_indices(nstate: int, fixed_sensor_locations: list[int], n
     return target_indices
 
 
-# Global state for per-phase randomization
+# Global state for per-epoch randomization
 _GLOBAL_TARGET_INDICES = None
 _GLOBAL_HISTORY_LENGTH = 20
 
 
 def set_epoch_targets(nstate: int, fixed_sensor_locations: list[int], num_target: int = 128, history_options: tuple = (10, 20, 30, 40)):
-    """Call this at the start of each phase to update target indices AND history length.
+    """Call this at the start of each epoch to update target indices and history length.
     
-    Both are randomized once per phase, then fixed for all batches in that phase.
+    Both are randomized once per epoch, then fixed for all batches in that epoch.
     """
     global _GLOBAL_TARGET_INDICES, _GLOBAL_HISTORY_LENGTH
     _GLOBAL_TARGET_INDICES = build_epoch_target_indices(nstate, fixed_sensor_locations, num_target)
@@ -188,7 +188,7 @@ def np_collate_fn(
     windows = _stack_batch(batch)
     batch_size, max_history_plus_one, nstate = windows.shape
     
-    # Use global history length (set once per phase)
+    # Use global history length (set once per epoch)
     if _GLOBAL_HISTORY_LENGTH is None:
         _GLOBAL_HISTORY_LENGTH = 20
     history = _GLOBAL_HISTORY_LENGTH
@@ -198,7 +198,7 @@ def np_collate_fn(
     
     sensor_indices = torch.as_tensor(fixed_sensor_locations, dtype=torch.long)
     
-    # Use global target indices (set once per phase)
+    # Use global target indices (set once per epoch)
     if _GLOBAL_TARGET_INDICES is None:
         _GLOBAL_TARGET_INDICES = build_epoch_target_indices(nstate, fixed_sensor_locations, num_target)
     target_indices = _GLOBAL_TARGET_INDICES
