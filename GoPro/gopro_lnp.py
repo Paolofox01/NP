@@ -51,7 +51,7 @@ def main() -> None:
     
     # Reset target indices + history length for this phase
     print("[Phase 1] Resetting target pixel indices and history length...")
-    set_epoch_targets(coords.shape[0], sensors, num_target=128, history_options=(10, 20, 30, 40))
+    set_epoch_targets(coords.shape[0], sensors, num_target=2048, history_options=(10, 20, 30, 40))
     
     train_np(
         train_loader, model, optimizer_p1, ELBOLossNP(beta=1.0), device,
@@ -88,7 +88,7 @@ def main() -> None:
     
     # Reset target indices + history length for this phase
     print("[Phase 2] Resetting target pixel indices and history length...")
-    set_epoch_targets(coords.shape[0], sensors, num_target=128, history_options=(10, 20, 30, 40))
+    set_epoch_targets(coords.shape[0], sensors, num_target=2048, history_options=(10, 20, 30, 40))
     
     history = train_np(
         train_loader, model, optimizer_p2, ELBOLossNP(beta=1.0), device,
