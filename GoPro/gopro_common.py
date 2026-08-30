@@ -41,7 +41,7 @@ class TimestepHistoryDataset(Dataset):
         return times, self.data[times]
 
 
-def load_videos(data_dir: Path) -> tuple[torch.Tensor, int, int, torch.Tensor, torch.Tensor]:
+def load_videos(data_dir: Path) -> tuple[torch.Tensor, int, int, int, int, torch.Tensor, torch.Tensor]:
     """Load, clip, normalize, and flatten the two grayscale GIF videos."""
     frames = []
     for filename in ("GoPro_video1.gif", "GoPro_video2.gif"):
@@ -63,6 +63,7 @@ def load_videos(data_dir: Path) -> tuple[torch.Tensor, int, int, torch.Tensor, t
 
     videos = torch.stack(frames)
     nframes, height, width = videos.shape[1:]
+    source_height, source_width = height, width
     
     # Optional: Downsample video resolution to speed up training
     # Set scale_factor to 0.5 for 50% resolution, 0.33 for 33%, etc.
@@ -77,7 +78,7 @@ def load_videos(data_dir: Path) -> tuple[torch.Tensor, int, int, torch.Tensor, t
     videos = videos.clamp(max=0.5)
     data_min, data_max = videos.min(), videos.max()
     normalized = (videos - data_min) / (data_max - data_min + 1e-8)
-    return normalized.view(2, nframes, height * width), height, width, data_min, data_max
+    return normalized.view(2, nframes, height * width), height, width, source_height, source_width, data_min, data_max
 
 
 def build_splits(videos: torch.Tensor, history_length: int = DEFAULT_HISTORY_LENGTH, stride: int = DEFAULT_STRIDE):
@@ -98,20 +99,34 @@ def build_splits(videos: torch.Tensor, history_length: int = DEFAULT_HISTORY_LEN
     return {name: ConcatDataset(items) for name, items in datasets.items()}
 
 
-def build_coordinates(height: int, width: int) -> tuple[torch.Tensor, list[int]]:
+def build_coordinates(
+    height: int,
+    width: int,
+    source_height: int | None = None,
+    source_width: int | None = None,
+) -> tuple[torch.Tensor, list[int]]:
     row, col = torch.meshgrid(torch.arange(height), torch.arange(width), indexing="ij")
     coords = torch.stack([row, col], dim=-1).reshape(-1, 2).float()
     coords[:, 0] = 2 * coords[:, 0] / max(height - 1, 1) - 1
     coords[:, 1] = 2 * coords[:, 1] / max(width - 1, 1) - 1
-    sensors = [r * width + c for r, c in DEFAULT_SENSOR_COORDS]
-    if any(sensor >= len(coords) for sensor in sensors):
+    source_height = source_height or height
+    source_width = source_width or width
+    scaled_sensor_coords = [
+        (
+            round(r * max(height - 1, 1) / max(source_height - 1, 1)),
+            round(c * max(width - 1, 1) / max(source_width - 1, 1)),
+        )
+        for r, c in DEFAULT_SENSOR_COORDS
+    ]
+    if any(r < 0 or r >= height or c < 0 or c >= width for r, c in scaled_sensor_coords):
         raise ValueError("Configured GoPro sensor coordinates exceed the video dimensions.")
+    sensors = [r * width + c for r, c in scaled_sensor_coords]
     return coords, sensors
 
 
 def prepare_data(data_dir: Path):
-    videos, height, width, data_min, data_max = load_videos(data_dir)
-    coordinates, sensors = build_coordinates(height, width)
+    videos, height, width, source_height, source_width, data_min, data_max = load_videos(data_dir)
+    coordinates, sensors = build_coordinates(height, width, source_height, source_width)
     return build_splits(videos), coordinates, sensors, videos.shape[1], height, width, data_min, data_max
 
 
