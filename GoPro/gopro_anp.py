@@ -25,7 +25,7 @@ def main() -> None:
     print("[GoPro ANP] Preparing GoPro data...")
     datasets, coords, sensors, _, _, _, _, _ = prepare_data(data_dir)
     print("[GoPro ANP] Building train/validation loaders...")
-    train_loader, val_loader = make_np_loaders(datasets, coords, sensors, batch_size=8)
+    train_loader, val_loader = make_np_loaders(datasets, coords, sensors, batch_size=16)
     print(f"[GoPro ANP] Train batches: {len(train_loader)}, Validation batches: {len(val_loader)}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[GoPro ANP] Using device: {device}")
