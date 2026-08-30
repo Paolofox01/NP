@@ -984,7 +984,7 @@ def main(USE_MU):
     print("\nInitializing LNP...")
     model_lnp = LatNP_simple(
         x_dim=x_dim, y_dim=y_dim, r_dim=r_dim, z_dim=z_dim, hidden_dim=hidden_dim, n_hidden=n_hidden,
-        activation=nn.SiLU, dropout=0.0, is_normalized=True, norm_type='layer',
+        activation=nn.ReLU, dropout=0.0, is_normalized=True, norm_type='layer',
         fourier_vars=3, num_frequencies=32, fourier_scale=1.0, learnable_fourier=True,
         use_deeponet_decoder=False, p=128,
     ).to(device)
