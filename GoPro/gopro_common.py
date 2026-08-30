@@ -63,6 +63,17 @@ def load_videos(data_dir: Path) -> tuple[torch.Tensor, int, int, torch.Tensor, t
 
     videos = torch.stack(frames)
     nframes, height, width = videos.shape[1:]
+    
+    # Optional: Downsample video resolution to speed up training
+    # Set scale_factor to 0.5 for 50% resolution, 0.33 for 33%, etc.
+    scale_factor = 1.0  # Change this to downsample (e.g., 0.5, 0.33, 0.25)
+    if scale_factor < 1.0:
+        videos_flat = videos.view(2 * nframes, 1, height, width)
+        videos_flat = F.interpolate(videos_flat, scale_factor=scale_factor, mode='bilinear', align_corners=False)
+        videos = videos_flat.view(2, nframes, int(height * scale_factor), int(width * scale_factor))
+        height, width = int(height * scale_factor), int(width * scale_factor)
+        print(f"[GoPro] Downsampled video to {height}x{width}")
+    
     videos = videos.clamp(max=0.5)
     data_min, data_max = videos.min(), videos.max()
     normalized = (videos - data_min) / (data_max - data_min + 1e-8)
@@ -226,17 +237,21 @@ def gaussian_nll(mean: torch.Tensor, variance: torch.Tensor, target: torch.Tenso
     return 0.5 * (math.log(2.0 * math.pi) + variance.log() + (target - mean).square() / variance).mean()
 
 
-def make_np_loaders(datasets, coords, sensors, batch_size: int = 8):
+def make_np_loaders(datasets, coords, sensors, batch_size: int = 8, num_workers: int = 4):
     collate = partial(np_collate_fn, mesh_coords=coords, fixed_sensor_locations=sensors)
     return (
-        DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate),
-        DataLoader(datasets["val"], batch_size=batch_size, shuffle=False, collate_fn=collate),
+        DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate, 
+                  num_workers=num_workers, pin_memory=True, prefetch_factor=2),
+        DataLoader(datasets["val"], batch_size=batch_size, shuffle=False, collate_fn=collate,
+                  num_workers=num_workers, pin_memory=True, prefetch_factor=2),
     )
 
 
-def make_don_loaders(datasets, coords, sensors, batch_size: int = 8):
+def make_don_loaders(datasets, coords, sensors, batch_size: int = 8, num_workers: int = 4):
     collate = partial(don_collate_fn, mesh_coords=coords, fixed_sensor_locations=sensors)
     return (
-        DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate),
-        DataLoader(datasets["val"], batch_size=batch_size, shuffle=False, collate_fn=collate),
+        DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate,
+                  num_workers=num_workers, pin_memory=True, prefetch_factor=2),
+        DataLoader(datasets["val"], batch_size=batch_size, shuffle=False, collate_fn=collate,
+                  num_workers=num_workers, pin_memory=True, prefetch_factor=2),
     )
