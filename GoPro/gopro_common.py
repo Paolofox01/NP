@@ -66,7 +66,7 @@ def load_videos(data_dir: Path) -> tuple[torch.Tensor, int, int, torch.Tensor, t
     
     # Optional: Downsample video resolution to speed up training
     # Set scale_factor to 0.5 for 50% resolution, 0.33 for 33%, etc.
-    scale_factor = 1.0  # Change this to downsample (e.g., 0.5, 0.33, 0.25)
+    scale_factor = 0.5  # Change this to downsample (e.g., 0.5, 0.33, 0.25)
     if scale_factor < 1.0:
         videos_flat = videos.view(2 * nframes, 1, height, width)
         videos_flat = F.interpolate(videos_flat, scale_factor=scale_factor, mode='bilinear', align_corners=False)
@@ -119,29 +119,75 @@ def _stack_batch(batch):
     return torch.stack([item[1] for item in batch])
 
 
+def build_epoch_target_indices(nstate: int, fixed_sensor_locations: list[int], num_target: int = 128):
+    """Pre-generate fixed target indices for each epoch to balance speed vs. diversity.
+    
+    Call this once per epoch to get epoch-specific targets.
+    Targets change per epoch (spatial diversity) but stay fixed within epoch (fast collate).
+    """
+    sensor_indices = torch.as_tensor(fixed_sensor_locations, dtype=torch.long)
+    all_indices = torch.arange(nstate)
+    extra_mask = torch.ones(nstate, dtype=torch.bool)
+    extra_mask[sensor_indices] = False
+    
+    # Shuffle extra indices for this epoch
+    extra_indices_all = all_indices[extra_mask]
+    perm = torch.randperm(len(extra_indices_all))
+    extra_indices = extra_indices_all[perm][:num_target]
+    
+    target_indices = torch.cat([sensor_indices, extra_indices])
+    return target_indices
+
+
+# Global state for per-phase randomization
+_GLOBAL_TARGET_INDICES = None
+_GLOBAL_HISTORY_LENGTH = 20
+
+
+def set_epoch_targets(nstate: int, fixed_sensor_locations: list[int], num_target: int = 128, history_options: tuple = (10, 20, 30, 40)):
+    """Call this at the start of each phase to update target indices AND history length.
+    
+    Both are randomized once per phase, then fixed for all batches in that phase.
+    """
+    global _GLOBAL_TARGET_INDICES, _GLOBAL_HISTORY_LENGTH
+    _GLOBAL_TARGET_INDICES = build_epoch_target_indices(nstate, fixed_sensor_locations, num_target)
+    _GLOBAL_HISTORY_LENGTH = int(history_options[torch.randint(len(history_options), ()).item()])
+    print(f"  → Target indices: {_GLOBAL_TARGET_INDICES.shape[0]} points, History length: {_GLOBAL_HISTORY_LENGTH}")
+
+
 def np_collate_fn(
     batch,
     mesh_coords: torch.Tensor,
     fixed_sensor_locations: list[int],
-    num_target_min: int = 256,
-    num_target_max: int = 512,
-    history_options: tuple[int, ...] = (10, 20, 30, 40),
+    num_target: int = 128,
+    history: int = 20,
 ):
-    """Optimized: Reduced sampling and simplified tensor ops for GPU."""
+    """Minimal collate: Uses epoch-specific fixed targets and history (set via set_epoch_targets).
+    
+    Pre-computing per-epoch reduces CPU overhead significantly:
+    - No per-batch random sampling (still per-epoch randomization)
+    - No history_options selection per batch
+    - Direct indexing only
+    """
+    global _GLOBAL_TARGET_INDICES, _GLOBAL_HISTORY_LENGTH
+    
     windows = _stack_batch(batch)
     batch_size, max_history_plus_one, nstate = windows.shape
-    history = int(history_options[torch.randint(len(history_options), ()).item()])
+    
+    # Use global history length (set once per phase)
+    if _GLOBAL_HISTORY_LENGTH is None:
+        _GLOBAL_HISTORY_LENGTH = 20
+    history = _GLOBAL_HISTORY_LENGTH
+    
     if history >= max_history_plus_one:
         raise ValueError("Requested GoPro history exceeds the dataset window.")
     
     sensor_indices = torch.as_tensor(fixed_sensor_locations, dtype=torch.long)
-    target_count = min(torch.randint(num_target_min, num_target_max + 1, ()).item(), nstate - len(sensor_indices))
     
-    # Fast random sampling: avoid nonzero + randperm, use direct randn + argsort
-    random_vals = torch.rand(nstate)
-    random_vals[sensor_indices] = -1  # Exclude sensor locations
-    extra_indices = torch.argsort(random_vals, descending=True)[:target_count]
-    target_indices = torch.cat([sensor_indices, extra_indices])
+    # Use global target indices (set once per phase)
+    if _GLOBAL_TARGET_INDICES is None:
+        _GLOBAL_TARGET_INDICES = build_epoch_target_indices(nstate, fixed_sensor_locations, num_target)
+    target_indices = _GLOBAL_TARGET_INDICES
 
     context_values = windows[:, -(history + 1):, sensor_indices]
     offsets = torch.linspace(-1.0, 0.0, history + 1).repeat_interleave(len(sensor_indices)).unsqueeze(-1)
@@ -239,21 +285,21 @@ def gaussian_nll(mean: torch.Tensor, variance: torch.Tensor, target: torch.Tenso
     return 0.5 * (math.log(2.0 * math.pi) + variance.log() + (target - mean).square() / variance).mean()
 
 
-def make_np_loaders(datasets, coords, sensors, batch_size: int = 32, num_workers: int = 8):
+def make_np_loaders(datasets, coords, sensors, batch_size: int = 32, num_workers: int = 0):
     collate = partial(np_collate_fn, mesh_coords=coords, fixed_sensor_locations=sensors)
     return (
         DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate, 
-                  num_workers=num_workers, pin_memory=True, prefetch_factor=3, persistent_workers=True),
+                  num_workers=num_workers, pin_memory=True),
         DataLoader(datasets["val"], batch_size=batch_size, shuffle=False, collate_fn=collate,
-                  num_workers=num_workers, pin_memory=True, prefetch_factor=3, persistent_workers=True),
+                  num_workers=num_workers, pin_memory=True),
     )
 
 
-def make_don_loaders(datasets, coords, sensors, batch_size: int = 32, num_workers: int = 8):
+def make_don_loaders(datasets, coords, sensors, batch_size: int = 32, num_workers: int = 0):
     collate = partial(don_collate_fn, mesh_coords=coords, fixed_sensor_locations=sensors)
     return (
         DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate,
-                  num_workers=num_workers, pin_memory=True, prefetch_factor=3, persistent_workers=True),
+                  num_workers=num_workers, pin_memory=True),
         DataLoader(datasets["val"], batch_size=batch_size, shuffle=False, collate_fn=collate,
-                  num_workers=num_workers, pin_memory=True, prefetch_factor=3, persistent_workers=True),
+                  num_workers=num_workers, pin_memory=True),
     )

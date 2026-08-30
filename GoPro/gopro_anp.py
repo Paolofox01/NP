@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from GoPro.gopro_common import make_np_loaders, prepare_data
+from GoPro.gopro_common import make_np_loaders, prepare_data, set_epoch_targets
 from LNP.LatentNP import LatNP
 from LNP.loss_np import ELBOLossNP
 from LNP.training import train_np
@@ -25,7 +25,7 @@ def main() -> None:
     print("[GoPro ANP] Preparing GoPro data...")
     datasets, coords, sensors, _, _, _, _, _ = prepare_data(data_dir)
     print("[GoPro ANP] Building train/validation loaders...")
-    train_loader, val_loader = make_np_loaders(datasets, coords, sensors, batch_size=16)
+    train_loader, val_loader = make_np_loaders(datasets, coords, sensors, batch_size=32)
     print(f"[GoPro ANP] Train batches: {len(train_loader)}, Validation batches: {len(val_loader)}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[GoPro ANP] Using device: {device}")
@@ -48,6 +48,10 @@ def main() -> None:
     beta_schedule_p1 = [0.0] * epochs_p1
     p1_checkpoints_dir = checkpoints / "phase1"
     p1_checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Reset target indices + history length for this phase
+    print("[Phase 1] Resetting target pixel indices and history length...")
+    set_epoch_targets(datasets[list(datasets.keys())[0]].data.shape[2], sensors, num_target=128, history_options=(10, 20, 30, 40))
     
     train_np(
         train_loader, model, optimizer_p1, ELBOLossNP(beta=1.0), device,
@@ -81,6 +85,10 @@ def main() -> None:
     beta_schedule_p2 = [beta_target * (e / ramp_epochs) for e in range(ramp_epochs)] + [beta_target] * (epochs_p2 - ramp_epochs)
     p2_checkpoints_dir = checkpoints / "phase2"
     p2_checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Reset target indices + history length for this phase
+    print("[Phase 2] Resetting target pixel indices and history length...")
+    set_epoch_targets(datasets[list(datasets.keys())[0]].data.shape[2], sensors, num_target=128, history_options=(10, 20, 30, 40))
     
     history = train_np(
         train_loader, model, optimizer_p2, ELBOLossNP(beta=1.0), device,
