@@ -37,8 +37,8 @@ IS_KAGGLE = os.path.exists("/kaggle/input")
 
 if IS_KAGGLE:
     BASE_DATA_DIR = Path("/kaggle/input/datasets/filippovolpicelli/pinball-data")
-    KAGGLE_NB1 = Path("/kaggle/input/notebooks/filippovolpicelli/pinball-nb/NP")
-    KAGGLE_NB2 = Path("/kaggle/input/notebooks/filippovolpicelli/notebookae593e1af4/NP")
+    KAGGLE_NB1 = Path("/kaggle/input/notebooks/filippovolpicelli/pinball-nb/NP/pinball")
+    KAGGLE_NB2 = Path("/kaggle/input/notebooks/filippovolpicelli/notebookae593e1af4/NP/pinball")
     
     OUTPUT_LOGS_DIR = Path("/kaggle/working/logs_compare")
     
@@ -456,6 +456,22 @@ def compute_standardized_se(y_pred_mean, y_pred_var, y_true):
     var_clamp = y_pred_var.clamp_min(1e-8)
     return ((y_true - y_pred_mean)**2) / var_clamp
 
+def diagnostic_color_limits(targets):
+    state_min, state_max = targets.amin().item(), targets.amax().item()
+    state_span = max(state_max - state_min, 1e-8)
+    reference_std = max(targets.std().item(), 1e-8)
+    max_standardized_error = 10.0
+    reference_variance = reference_std ** 2
+    max_log_likelihood = -0.5 * math.log(2.0 * math.pi * reference_variance)
+    min_log_likelihood = max_log_likelihood - 0.5 * max_standardized_error
+    return {
+        "state": (state_min, state_max),
+        "squared_error": (0.0, state_span ** 2),
+        "standard_deviation": (0.0, state_span),
+        "log_likelihood": (min_log_likelihood, max_log_likelihood),
+        "standardized_error": (0.0, max_standardized_error),
+    }
+
 plt.style.use('default')
 
 METHOD_STYLES = {
@@ -549,7 +565,7 @@ def plot_all_distributions(ll_dict, se_dict, sse_dict, mse_dict, out_path, bins=
 # ============================================================
 # 4. SINGLE BATCH EVALUATION & GRID PLOTTING
 # ============================================================
-def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, fixed_sens, Yh, USE_MU, device, logs_dir, model_format="np"):
+def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, fixed_sens, Yh, USE_MU, device, logs_dir, color_limits, model_format="np"):
     """Valuta un batch singolo per Neural Processes generando la griglia 2x3 e i 10 campioni MC 2x5."""
     model.eval()
     test_indices = np.array([0, 1, 2])
@@ -590,9 +606,6 @@ def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, 
         sample_lls = -0.5 * (ll_const + torch.log(var_clamp) + ((y_target_cpu - y_pred_mc)**2) / var_clamp)
         log_lik_all = torch.logsumexp(sample_lls, dim=0) - math.log(num_mc_samples)
         
-        ll_vmin_global, ll_vmax_global = log_lik_all.min().item(), log_lik_all.max().item()
-        if ll_vmax_global == ll_vmin_global: ll_vmax_global = ll_vmin_global + 1e-8
-
         for batch_idx in range(len(test_indices)):
             context = x_context[batch_idx].cpu()[:, 4:6] if USE_MU else x_context[batch_idx].cpu()[:, 1:3]
             sample_pred_runs = y_pred_mc[:, batch_idx, :]
@@ -605,19 +618,6 @@ def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, 
             sample_log_lik = log_lik_all[batch_idx]
             sample_sse = sample_sq_error / sample_total_var.clamp_min(1e-8)
 
-            state_vmin = torch.min(sample_pred_runs.min(), sample_target.min()).item()
-            state_vmax = torch.max(sample_pred_runs.max(), sample_target.max()).item()
-            if state_vmax == state_vmin: state_vmax = state_vmin + 1e-8
-
-            std_vmin, std_vmax = sample_total_std.min().item(), sample_total_std.max().item()
-            if std_vmax == std_vmin: std_vmax = std_vmin + 1e-8
-
-            sq_err_vmin, sq_err_vmax = 0.0, sample_sq_error.max().item()
-            if sq_err_vmax == sq_err_vmin: sq_err_vmax = sq_err_vmin + 1e-8
-
-            sse_vmin, sse_vmax = 0.0, sample_sse.max().item()
-            if sse_vmax == sse_vmin: sse_vmax = sse_vmin + 1e-8
-
             def _local_plot(val_array, cmap, vmin, vmax, title, ax):
                 plt.sca(ax)
                 plot_with_colorbar(val_array, Yh, cmap=cmap, vmin=vmin, vmax=vmax, label=title)
@@ -627,12 +627,12 @@ def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, 
 
             # 2x3 Diagnostic Grid
             fig, axes = plt.subplots(2, 3, figsize=(30, 16))
-            _local_plot(sample_target, "jet", state_vmin, state_vmax, "Truth", axes[0, 0])
-            _local_plot(sample_pred, "jet", state_vmin, state_vmax, "Mean Prediction", axes[0, 1])
-            _local_plot(sample_sq_error, "magma", sq_err_vmin, sq_err_vmax, "Squared Error (MSE)", axes[0, 2])
-            _local_plot(sample_total_std, "magma", std_vmin, std_vmax, "Standard Deviation", axes[1, 0])
-            _local_plot(sample_log_lik, "magma", ll_vmin_global, ll_vmax_global, "Log-likelihood", axes[1, 1])
-            _local_plot(sample_sse, "magma", sse_vmin, sse_vmax, "Standardized SE", axes[1, 2])
+            _local_plot(sample_target, "jet", *color_limits["state"], "Truth", axes[0, 0])
+            _local_plot(sample_pred, "jet", *color_limits["state"], "Mean Prediction", axes[0, 1])
+            _local_plot(sample_sq_error, "magma", *color_limits["squared_error"], "Squared Error (MSE)", axes[0, 2])
+            _local_plot(sample_total_std, "magma", *color_limits["standard_deviation"], "Standard Deviation", axes[1, 0])
+            _local_plot(sample_log_lik, "magma", *color_limits["log_likelihood"], "Log-likelihood", axes[1, 1])
+            _local_plot(sample_sse, "magma", *color_limits["standardized_error"], "Standardized SE", axes[1, 2])
 
             plt.tight_layout(rect=[0, 0, 1, 0.95])
             plt.savefig(logs_dir / f"multiplot_grid_2x3_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
@@ -643,12 +643,12 @@ def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, 
             fig_mc.suptitle(f"10 Monte Carlo Samples | Sample {test_indices[batch_idx]} | Lag: {current_lag}", fontsize=22)
             for i in range(10):
                 row, col = i // 5, i % 5
-                _local_plot(sample_pred_runs[i], "jet", state_vmin, state_vmax, f"MC Run {i+1}", axes_mc[row, col])
+                _local_plot(sample_pred_runs[i], "jet", *color_limits["state"], f"MC Run {i+1}", axes_mc[row, col])
             plt.tight_layout(rect=[0, 0, 1, 0.95])
             plt.savefig(logs_dir / f"mc_10_samples_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
             plt.close(fig_mc)
 
-def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, fixed_sens, Yh, USE_MU, device, logs_dir, is_probabilistic=False, model_format="don", likelihood=None, y_mean=None, y_std=None):
+def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, fixed_sens, Yh, USE_MU, device, logs_dir, color_limits, is_probabilistic=False, model_format="don", likelihood=None, y_mean=None, y_std=None):
     """Valuta un batch per DeepONet o Gaussian Process."""
     model.eval()
     if likelihood is not None: likelihood.eval()
@@ -711,13 +711,6 @@ def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_colla
             sample_target = y_target_cpu[batch_idx]
             sample_sq_error = (sample_pred - sample_target) ** 2
 
-            state_vmin = torch.min(sample_pred.min(), sample_target.min()).item()
-            state_vmax = torch.max(sample_pred.max(), sample_target.max()).item()
-            if state_vmax == state_vmin: state_vmax = state_vmin + 1e-8
-
-            sq_err_vmin, sq_err_vmax = 0.0, sample_sq_error.max().item()
-            if sq_err_vmax == sq_err_vmin: sq_err_vmax = sq_err_vmin + 1e-8
-
             def _local_plot(val_array, cmap, vmin, vmax, title, ax):
                 plt.sca(ax)
                 plot_with_colorbar(val_array, Yh, cmap=cmap, vmin=vmin, vmax=vmax, label=title)
@@ -733,22 +726,19 @@ def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_colla
                 var_clamp = sample_var.clamp_min(1e-8)
                 sample_log_lik = -0.5 * (math.log(2 * math.pi) + torch.log(var_clamp) + sample_sse)
 
-                std_vmin, std_vmax = sample_std.min().item(), sample_std.max().item()
-                if std_vmax == std_vmin: std_vmax = std_vmin + 1e-8
-
                 fig, axes = plt.subplots(2, 3, figsize=(30, 16))
-                _local_plot(sample_target, "jet", state_vmin, state_vmax, "Truth", axes[0, 0])
-                _local_plot(sample_pred, "jet", state_vmin, state_vmax, "Mean Prediction", axes[0, 1])
-                _local_plot(sample_sq_error, "magma", sq_err_vmin, sq_err_vmax, "Squared Error (MSE)", axes[0, 2])
-                _local_plot(sample_std, "magma", std_vmin, std_vmax, "Standard Deviation", axes[1, 0])
-                _local_plot(sample_log_lik, "magma", sample_log_lik.min().item(), sample_log_lik.max().item(), "Log-likelihood", axes[1, 1])
-                _local_plot(sample_sse, "magma", 0.0, sample_sse.max().item(), "Standardized SE", axes[1, 2])
+                _local_plot(sample_target, "jet", *color_limits["state"], "Truth", axes[0, 0])
+                _local_plot(sample_pred, "jet", *color_limits["state"], "Mean Prediction", axes[0, 1])
+                _local_plot(sample_sq_error, "magma", *color_limits["squared_error"], "Squared Error (MSE)", axes[0, 2])
+                _local_plot(sample_std, "magma", *color_limits["standard_deviation"], "Standard Deviation", axes[1, 0])
+                _local_plot(sample_log_lik, "magma", *color_limits["log_likelihood"], "Log-likelihood", axes[1, 1])
+                _local_plot(sample_sse, "magma", *color_limits["standardized_error"], "Standardized SE", axes[1, 2])
                 grid_suffix = "prob_2x3"
             else:
                 fig, axes = plt.subplots(1, 3, figsize=(30, 8))
-                _local_plot(sample_target, "jet", state_vmin, state_vmax, "Truth", axes[0])
-                _local_plot(sample_pred, "jet", state_vmin, state_vmax, "Prediction", axes[1])
-                _local_plot(sample_sq_error, "magma", sq_err_vmin, sq_err_vmax, "Squared Error", axes[2])
+                _local_plot(sample_target, "jet", *color_limits["state"], "Truth", axes[0])
+                _local_plot(sample_pred, "jet", *color_limits["state"], "Prediction", axes[1])
+                _local_plot(sample_sq_error, "magma", *color_limits["squared_error"], "Squared Error", axes[2])
                 grid_suffix = "det_1x3"
 
             plt.tight_layout(rect=[0, 0, 1, 0.95])
@@ -886,6 +876,7 @@ def main(USE_MU):
     Ytest = Y[idx_test].reshape(idx_test.shape[0], ntimes, nstate)
     MUtest = MU[idx_test]
     test_dataset = SpatiotemporalDataset(Ytest, MUtest if USE_MU else None)
+    color_limits = diagnostic_color_limits(Ytest)
 
     # 3. Iperparametri Modelli
     x_dim = 6 if USE_MU else 3
@@ -946,7 +937,7 @@ def main(USE_MU):
     plot_batch_diagnostics(
         model=model_anp, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
-        device=device, logs_dir=logs_dir / "logs_anp", model_format="np"
+        device=device, logs_dir=logs_dir / "logs_anp", color_limits=color_limits, model_format="np"
     )
 
     # 5B. Multi-Lag Global Distribution Evaluation ANP
@@ -1004,7 +995,7 @@ def main(USE_MU):
     plot_batch_diagnostics(
         model=model_lnp, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
-        device=device, logs_dir=logs_dir / "logs_lnp", model_format="np"
+        device=device, logs_dir=logs_dir / "logs_lnp", color_limits=color_limits, model_format="np"
     )
 
     # 6B. Multi-Lag Global Distribution Evaluation LNP
@@ -1049,7 +1040,8 @@ def main(USE_MU):
     plot_non_mc_batch_diagnostics(
         model=model_probdeeponet, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
-        device=device, logs_dir=logs_dir / "logs_probdeeponet", is_probabilistic=True, model_format="don"
+        device=device, logs_dir=logs_dir / "logs_probdeeponet", color_limits=color_limits,
+        is_probabilistic=True, model_format="don"
     )
 
     # ==============================================================================
@@ -1065,7 +1057,8 @@ def main(USE_MU):
     plot_non_mc_batch_diagnostics(
         model=model_don, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
-        device=device, logs_dir=logs_dir / "logs_deeponet", is_probabilistic=False, model_format="don"
+        device=device, logs_dir=logs_dir / "logs_deeponet", color_limits=color_limits,
+        is_probabilistic=False, model_format="don"
     )
 
     # ==============================================================================
@@ -1092,7 +1085,8 @@ def main(USE_MU):
     plot_non_mc_batch_diagnostics(
         model=model_gp, test_dataset=gp_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=True,
-        device=device, logs_dir=logs_dir / "logs_gp", is_probabilistic=True, model_format="gp",
+        device=device, logs_dir=logs_dir / "logs_gp", color_limits=color_limits,
+        is_probabilistic=True, model_format="gp",
         likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std
     )
 
@@ -1167,7 +1161,8 @@ def main(USE_MU):
         plot_non_mc_batch_diagnostics(
             model=model_shred, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
             mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
-            device=device, logs_dir=logs_dir / "logs_shred", is_probabilistic=False, model_format="don"
+            device=device, logs_dir=logs_dir / "logs_shred", color_limits=color_limits,
+            is_probabilistic=False, model_format="don"
         )
     except ImportError:
         print("[!] Could not import SHRED from utils.models. Skipping SHRED.")

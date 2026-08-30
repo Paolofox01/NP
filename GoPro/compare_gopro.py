@@ -24,6 +24,13 @@ from GoPro.gopro_common import (
 from LNP.LATNPsimple import LatNP_simple
 from LNP.LatentNP import LatNP
 
+METHOD_STYLES = {
+    "ANP": {"color": "#E63946"},
+    "LNP": {"color": "#457B9D"},
+    "Prob-DeepONet": {"color": "#2A9D8F"},
+    "DeepONet": {"color": "#E9C46A"},
+}
+
 
 def load_checkpoint(model: torch.nn.Module, checkpoint: Path, device: torch.device) -> torch.nn.Module:
     if not checkpoint.exists():
@@ -115,11 +122,20 @@ def plot_distributions(metrics, output_path: Path) -> None:
     rows = [("Log likelihood", "ll"), ("Standardized squared error", "sse"), ("Squared error", "se"), ("Per-frame MSE", "mse")]
     figure, axes = plt.subplots(len(rows), 1, figsize=(10, 14))
     for axis, (title, key) in zip(axes, rows):
-        for name, values in metrics[key].items():
-            values = np.asarray(values)
-            if values.size:
-                upper = np.percentile(values, 99.5)
-                axis.hist(values[values <= upper], bins=80, density=True, alpha=0.35, label=name)
+        nonempty_values = [np.asarray(values).reshape(-1) for values in metrics[key].values() if np.asarray(values).size]
+        if nonempty_values:
+            all_values = np.concatenate(nonempty_values)
+            lower, upper = np.percentile(all_values, [0.5, 99.5])
+            if np.isclose(lower, upper):
+                upper = lower + 1e-8
+            bin_edges = np.linspace(lower, upper, 81)
+            for name, values in metrics[key].items():
+                values = np.asarray(values).reshape(-1)
+                if values.size:
+                    visible_values = values[(values >= lower) & (values <= upper)]
+                    style = METHOD_STYLES.get(name, {"color": "#000000"})
+                    axis.hist(visible_values, bins=bin_edges, density=True, alpha=0.35, color=style["color"], label=name)
+            axis.set_xlim(lower, upper)
         axis.set_title(title)
         axis.legend()
     figure.tight_layout()
