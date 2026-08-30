@@ -157,14 +157,34 @@ def build_epoch_target_indices(nstate: int, fixed_sensor_locations: list[int], n
 # Global state for per-epoch randomization
 _GLOBAL_TARGET_INDICES = None
 _GLOBAL_HISTORY_LENGTH = 20
+_GLOBAL_SENSOR_INDICES = None
 
 
-def set_epoch_targets(nstate: int, fixed_sensor_locations: list[int], num_target: int = 128, history_options: tuple = (10, 20, 30, 40)):
-    """Call this at the start of each epoch to update target indices and history length.
+def set_epoch_targets(
+    nstate: int,
+    fixed_sensor_locations: list[int],
+    num_target: int = 128,
+    history_options: tuple = (10, 20, 30, 40),
+    drop_sensor_options: tuple = (0,),
+):
+    """Set the target indices, history length, and active sensors for one epoch.
     
-    Both are randomized once per epoch, then fixed for all batches in that epoch.
+    At most one fixed sensor may be dropped when ``drop_sensor_options=(0, 1)``.
+    All selections remain fixed for every batch in the epoch.
     """
-    global _GLOBAL_TARGET_INDICES, _GLOBAL_HISTORY_LENGTH
+    global _GLOBAL_TARGET_INDICES, _GLOBAL_HISTORY_LENGTH, _GLOBAL_SENSOR_INDICES
+    sensors = torch.as_tensor(fixed_sensor_locations, dtype=torch.long).unique()
+    if sensors.numel() == 0:
+        raise ValueError("fixed_sensor_locations must contain at least one sensor.")
+    if not set(drop_sensor_options).issubset({0, 1}):
+        raise ValueError("drop_sensor_options may contain only 0 (keep all) and 1 (drop one).")
+    drop_count = drop_sensor_options[torch.randint(len(drop_sensor_options), ()).item()]
+    if drop_count and sensors.numel() <= 1:
+        raise ValueError("Cannot drop a sensor when only one fixed sensor is available.")
+    if drop_count:
+        _GLOBAL_SENSOR_INDICES = sensors[torch.randperm(sensors.numel())[1:]]
+    else:
+        _GLOBAL_SENSOR_INDICES = sensors
     _GLOBAL_TARGET_INDICES = build_epoch_target_indices(nstate, fixed_sensor_locations, num_target)
     _GLOBAL_HISTORY_LENGTH = int(history_options[torch.randint(len(history_options), ()).item()])
 
@@ -183,7 +203,7 @@ def np_collate_fn(
     - No history_options selection per batch
     - Direct indexing only
     """
-    global _GLOBAL_TARGET_INDICES, _GLOBAL_HISTORY_LENGTH
+    global _GLOBAL_TARGET_INDICES, _GLOBAL_HISTORY_LENGTH, _GLOBAL_SENSOR_INDICES
     
     windows = _stack_batch(batch)
     batch_size, max_history_plus_one, nstate = windows.shape
@@ -196,7 +216,9 @@ def np_collate_fn(
     if history >= max_history_plus_one:
         raise ValueError("Requested GoPro history exceeds the dataset window.")
     
-    sensor_indices = torch.as_tensor(fixed_sensor_locations, dtype=torch.long)
+    if _GLOBAL_SENSOR_INDICES is None:
+        _GLOBAL_SENSOR_INDICES = torch.as_tensor(fixed_sensor_locations, dtype=torch.long)
+    sensor_indices = _GLOBAL_SENSOR_INDICES
     
     # Use global target indices (set once per epoch)
     if _GLOBAL_TARGET_INDICES is None:

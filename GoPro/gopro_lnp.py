@@ -10,10 +10,27 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from GoPro.gopro_common import make_np_loaders, prepare_data, set_epoch_targets
+from GoPro.gopro_common import DEFAULT_HISTORY_LENGTH, make_np_loaders, np_eval_inputs, prepare_data, set_epoch_targets
 from LNP.LATNPsimple import LatNP_simple
 from LNP.loss_np import ELBOLossNP
 from LNP.training import train_np
+
+
+def print_max_history_test_result(model, test_dataset, coords, sensors, device) -> None:
+    x_context, y_context, x_target, y_target = np_eval_inputs(
+        [test_dataset[0]], coords, sensors, history=DEFAULT_HISTORY_LENGTH
+    )
+    x_context, y_context, x_target, y_target = (
+        tensor.to(device) for tensor in (x_context, y_context, x_target, y_target)
+    )
+    model.eval()
+    with torch.no_grad():
+        y_pred, _, *_ = model(x_context, y_context, x_target, y_target)
+    error = y_pred - y_target
+    print(
+        f"Max-history test case ({DEFAULT_HISTORY_LENGTH} frames) - "
+        f"MSE: {error.square().mean().item():.6f}, MAE: {error.abs().mean().item():.6f}"
+    )
 
 
 def main() -> None:
@@ -55,7 +72,9 @@ def main() -> None:
         early_stopping_patience=1000, is_meta_learning=True, verbose=True, print_every=10,
         checkpoint_dir=str(p1_checkpoints_dir), beta_schedule=beta_schedule_p1,
         early_stopping_start_epoch=epochs_p1 + 1,
-        on_epoch_start=lambda _: set_epoch_targets(coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40)),
+        on_epoch_start=lambda _: set_epoch_targets(
+            coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
+        ),
     )
     
     phase1_complete_path = checkpoints / "phase1_complete.pt"
@@ -78,7 +97,7 @@ def main() -> None:
         param.requires_grad = True
     
     optimizer_p2 = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
-    scheduler_p2 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_p2, mode="min", factor=0.5, patience=256, min_lr=1e-6)
+    scheduler_p2 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_p2, mode="min", factor=0.5, patience=64, min_lr=1e-6)
     beta_schedule_p2 = [beta_target * (e / ramp_epochs) for e in range(ramp_epochs)] + [beta_target] * (epochs_p2 - ramp_epochs)
     p2_checkpoints_dir = checkpoints / "phase2"
     p2_checkpoints_dir.mkdir(parents=True, exist_ok=True)
@@ -89,12 +108,15 @@ def main() -> None:
         early_stopping_patience=1000, is_meta_learning=True, verbose=True, print_every=10,
         checkpoint_dir=str(p2_checkpoints_dir), beta_schedule=beta_schedule_p2,
         early_stopping_start_epoch=ramp_epochs,
-        on_epoch_start=lambda _: set_epoch_targets(coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40)),
+        on_epoch_start=lambda _: set_epoch_targets(
+            coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
+        ),
     )
     
     print("\nTraining completely finished!")
     print(f"Final train loss: {history['train_loss'][-1]:.4f}")
     print(f"Final val loss: {history['val_loss'][-1]:.4f}")
+    print_max_history_test_result(model, datasets["test"], coords, sensors, device)
 
 
 if __name__ == "__main__":
