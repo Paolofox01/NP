@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 
@@ -16,7 +17,7 @@ from LNP.loss_np import ELBOLossNP
 from LNP.training import train_np
 
 
-def print_max_history_test_result(model, test_dataset, coords, sensors, device) -> None:
+def print_max_history_test_result(model, test_dataset, coords, sensors, height, width, device, output_path: Path) -> None:
     x_context, y_context, x_target, y_target = np_eval_inputs(
         [test_dataset[0]], coords, sensors, history=DEFAULT_HISTORY_LENGTH
     )
@@ -25,12 +26,33 @@ def print_max_history_test_result(model, test_dataset, coords, sensors, device) 
     )
     model.eval()
     with torch.no_grad():
-        y_pred, _, *_ = model(x_context, y_context, x_target, y_target)
+        y_pred, y_var, *_ = model(x_context, y_context, x_target, y_target)
     error = y_pred - y_target
     print(
         f"Max-history test case ({DEFAULT_HISTORY_LENGTH} frames) - "
         f"MSE: {error.square().mean().item():.6f}, MAE: {error.abs().mean().item():.6f}"
     )
+    target_image = y_target[0, :, 0].cpu().reshape(height, width)
+    prediction_image = y_pred[0, :, 0].cpu().reshape(height, width)
+    variance_image = y_var[0, :, 0].cpu().reshape(height, width)
+    value_min = min(target_image.min().item(), prediction_image.min().item())
+    value_max = max(target_image.max().item(), prediction_image.max().item())
+    figure, axes = plt.subplots(1, 3, figsize=(15, 4))
+    for axis, image, title, cmap, vmin, vmax in (
+        (axes[0], target_image, "Test target", "gray", value_min, value_max),
+        (axes[1], prediction_image, "Prediction", "gray", value_min, value_max),
+        (axes[2], variance_image, "Predictive variance", "magma", 0.0, variance_image.max().item()),
+    ):
+        plot = axis.imshow(image, cmap=cmap, vmin=vmin, vmax=vmax)
+        axis.set_title(title)
+        axis.axis("off")
+        figure.colorbar(plot, ax=axis, fraction=0.046, pad=0.04)
+    figure.suptitle(f"Maximum-history test prediction ({DEFAULT_HISTORY_LENGTH} frames)")
+    figure.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(figure)
+    print(f"Saved test prediction diagnostic to {output_path}")
 
 
 def main() -> None:
@@ -40,7 +62,7 @@ def main() -> None:
     print(f"[GoPro ANP] Data directory: {data_dir}")
     print(f"[GoPro ANP] Checkpoint directory: {checkpoints}")
     print("[GoPro ANP] Preparing GoPro data...")
-    datasets, coords, sensors, _, _, _, _, _ = prepare_data(data_dir)
+    datasets, coords, sensors, _, height, width, _, _ = prepare_data(data_dir)
     print("[GoPro ANP] Building train/validation loaders...")
     train_loader, val_loader = make_np_loaders(datasets, coords, sensors, batch_size=32)
     print(f"[GoPro ANP] Train batches: {len(train_loader)}, Validation batches: {len(val_loader)}")
@@ -116,7 +138,10 @@ def main() -> None:
     print("\nTraining completely finished!")
     print(f"Final train loss: {history['train_loss'][-1]:.4f}")
     print(f"Final val loss: {history['val_loss'][-1]:.4f}")
-    print_max_history_test_result(model, datasets["test"], coords, sensors, device)
+    print_max_history_test_result(
+        model, datasets["test"], coords, sensors, height, width, device,
+        checkpoints / "max_history_test_prediction.png",
+    )
 
 
 if __name__ == "__main__":
