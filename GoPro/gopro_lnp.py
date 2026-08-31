@@ -82,7 +82,7 @@ def main() -> None:
     print("PHASE 1: DETERMINISTIC WARMUP (100 Epochs)")
     print("="*60)
     
-    epochs_p1 = 100
+    epochs_p1 = 1000
     optimizer_p1 = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=2e-4, weight_decay=0.0)
     beta_schedule_p1 = [0.0] * epochs_p1
     p1_checkpoints_dir = checkpoints / "phase1"
@@ -95,7 +95,7 @@ def main() -> None:
         checkpoint_dir=str(p1_checkpoints_dir), beta_schedule=beta_schedule_p1,
         early_stopping_start_epoch=epochs_p1 + 1,
         on_epoch_start=lambda _: set_epoch_targets(
-            coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
+            coords.shape[0], sensors, num_target=256, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
         ),
     )
     
@@ -110,8 +110,8 @@ def main() -> None:
     print("PHASE 2: STOCHASTIC FINE-TUNING (500 Epochs)")
     print("="*60)
     
-    epochs_p2 = 500
-    ramp_epochs = 200
+    epochs_p2 = 4000
+    ramp_epochs = 2000
     beta_target = 1.0
     
     model.load_state_dict(torch.load(phase1_complete_path, map_location=device))
@@ -131,7 +131,7 @@ def main() -> None:
         checkpoint_dir=str(p2_checkpoints_dir), beta_schedule=beta_schedule_p2,
         early_stopping_start_epoch=ramp_epochs,
         on_epoch_start=lambda _: set_epoch_targets(
-            coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
+            coords.shape[0], sensors, num_target=256, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
         ),
     )
     
