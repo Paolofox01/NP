@@ -79,7 +79,7 @@ def main() -> None:
     # PHASE 1: DETERMINISTIC WARMUP (Beta = 0)
     # =====================================================================
     print("\n" + "="*60)
-    print("PHASE 1: DETERMINISTIC WARMUP (100 Epochs)")
+    print("PHASE 1: DETERMINISTIC WARMUP (500 Epochs)")
     print("="*60)
     
     epochs_p1 = 500

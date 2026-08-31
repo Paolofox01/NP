@@ -321,7 +321,7 @@ def gaussian_nll(mean: torch.Tensor, variance: torch.Tensor, target: torch.Tenso
     return 0.5 * (math.log(2.0 * math.pi) + variance.log() + (target - mean).square() / variance).mean()
 
 
-def make_np_loaders(datasets, coords, sensors, batch_size: int = 128, num_workers: int = 0):
+def make_np_loaders(datasets, coords, sensors, batch_size: int = 128, num_workers: int = 2):
     collate = partial(np_collate_fn, mesh_coords=coords, fixed_sensor_locations=sensors)
     return (
         DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate, 
@@ -331,7 +331,7 @@ def make_np_loaders(datasets, coords, sensors, batch_size: int = 128, num_worker
     )
 
 
-def make_don_loaders(datasets, coords, sensors, batch_size: int = 128, num_workers: int = 0):
+def make_don_loaders(datasets, coords, sensors, batch_size: int = 128, num_workers: int = 2):
     collate = partial(don_collate_fn, mesh_coords=coords, fixed_sensor_locations=sensors)
     return (
         DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate,
