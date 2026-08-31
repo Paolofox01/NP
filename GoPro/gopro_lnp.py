@@ -135,6 +135,12 @@ def main() -> None:
         ),
     )
     
+    best_model_path = p2_checkpoints_dir / "best_model.pt"
+    if not best_model_path.exists():
+        raise FileNotFoundError(f"Best Phase 2 checkpoint was not saved: {best_model_path}")
+    best_checkpoint = torch.load(best_model_path, map_location=device)
+    model.load_state_dict(best_checkpoint["model_state_dict"])
+
     print("\nTraining completely finished!")
     print(f"Final train loss: {history['train_loss'][-1]:.4f}")
     print(f"Final val loss: {history['val_loss'][-1]:.4f}")
