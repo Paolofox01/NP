@@ -88,16 +88,16 @@ def main() -> None:
     p1_checkpoints_dir = checkpoints / "phase1"
     p1_checkpoints_dir.mkdir(parents=True, exist_ok=True)
     
-    train_np(
-        train_loader, model, optimizer_p1, ELBOLossNP(beta=1.0), device,
-        epochs=epochs_p1, val_loader=val_loader, scheduler=None, gradient_clip=1.0,
-        early_stopping_patience=1000, is_meta_learning=True, verbose=True, print_every=10,
-        checkpoint_dir=str(p1_checkpoints_dir), beta_schedule=beta_schedule_p1,
-        early_stopping_start_epoch=epochs_p1 + 1,
-        on_epoch_start=lambda _: set_epoch_targets(
-            coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
-        ),
-    )
+    # train_np(
+    #     train_loader, model, optimizer_p1, ELBOLossNP(beta=1.0), device,
+    #     epochs=epochs_p1, val_loader=val_loader, scheduler=None, gradient_clip=1.0,
+    #     early_stopping_patience=1000, is_meta_learning=True, verbose=True, print_every=10,
+    #     checkpoint_dir=str(p1_checkpoints_dir), beta_schedule=beta_schedule_p1,
+    #     early_stopping_start_epoch=epochs_p1 + 1,
+    #     on_epoch_start=lambda _: set_epoch_targets(
+    #         coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
+    #     ),
+    # )
     
     phase1_complete_path = checkpoints / "phase1_complete.pt"
     torch.save(model.state_dict(), phase1_complete_path)
@@ -124,16 +124,16 @@ def main() -> None:
     p2_checkpoints_dir = checkpoints / "phase2"
     p2_checkpoints_dir.mkdir(parents=True, exist_ok=True)
     
-    history = train_np(
-        train_loader, model, optimizer_p2, ELBOLossNP(beta=1.0), device,
-        epochs=epochs_p2, val_loader=val_loader, scheduler=scheduler_p2, gradient_clip=1.0,
-        early_stopping_patience=1000, is_meta_learning=True, verbose=True, print_every=10,
-        checkpoint_dir=str(p2_checkpoints_dir), beta_schedule=beta_schedule_p2,
-        early_stopping_start_epoch=ramp_epochs,
-        on_epoch_start=lambda _: set_epoch_targets(
-            coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
-        ),
-    )
+    # history = train_np(
+    #     train_loader, model, optimizer_p2, ELBOLossNP(beta=1.0), device,
+    #     epochs=epochs_p2, val_loader=val_loader, scheduler=scheduler_p2, gradient_clip=1.0,
+    #     early_stopping_patience=1000, is_meta_learning=True, verbose=True, print_every=10,
+    #     checkpoint_dir=str(p2_checkpoints_dir), beta_schedule=beta_schedule_p2,
+    #     early_stopping_start_epoch=ramp_epochs,
+    #     on_epoch_start=lambda _: set_epoch_targets(
+    #         coords.shape[0], sensors, num_target=8192, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
+    #     ),
+    # )
     
     best_model_path = p2_checkpoints_dir / "best_model.pt"
     if not best_model_path.exists():
@@ -142,8 +142,8 @@ def main() -> None:
     model.load_state_dict(best_checkpoint["model_state_dict"])
 
     print("\nTraining completely finished!")
-    print(f"Final train loss: {history['train_loss'][-1]:.4f}")
-    print(f"Final val loss: {history['val_loss'][-1]:.4f}")
+    # print(f"Final train loss: {history['train_loss'][-1]:.4f}")
+    # print(f"Final val loss: {history['val_loss'][-1]:.4f}")
     print_max_history_test_result(
         model, datasets["test"], coords, sensors, height, width, device,
         checkpoints / "max_history_test_prediction.png",
