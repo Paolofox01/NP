@@ -16,7 +16,6 @@ from LNP.LATNPsimple import LatNP_simple
 from LNP.loss_np import ELBOLossNP
 from LNP.training import train_np
 
-
 def print_max_history_test_result(model, test_dataset, coords, sensors, height, width, device, output_path: Path) -> None:
     x_context, y_context, x_target, y_target = np_eval_inputs(
         [test_dataset[0]], coords, sensors, history=DEFAULT_HISTORY_LENGTH
@@ -35,6 +34,8 @@ def print_max_history_test_result(model, test_dataset, coords, sensors, height, 
     target_image = y_target[0, :, 0].cpu().reshape(height, width)
     prediction_image = y_pred[0, :, 0].cpu().reshape(height, width)
     variance_image = y_var[0, :, 0].cpu().reshape(height, width)
+    sensor_rows = [sensor // width for sensor in sensors]
+    sensor_columns = [sensor % width for sensor in sensors]
     value_min = min(target_image.min().item(), prediction_image.min().item())
     value_max = max(target_image.max().item(), prediction_image.max().item())
     figure, axes = plt.subplots(1, 3, figsize=(15, 4))
@@ -44,6 +45,7 @@ def print_max_history_test_result(model, test_dataset, coords, sensors, height, 
         (axes[2], variance_image, "Predictive variance", "magma", 0.0, variance_image.max().item()),
     ):
         plot = axis.imshow(image, cmap=cmap, vmin=vmin, vmax=vmax)
+        axis.scatter(sensor_columns, sensor_rows, marker="x", s=80, c="cyan", linewidths=2)
         axis.set_title(title)
         axis.axis("off")
         figure.colorbar(plot, ax=axis, fraction=0.046, pad=0.04)
