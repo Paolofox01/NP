@@ -134,7 +134,7 @@ def main() -> None:
     print("="*60)
     
     epochs_p2 = 600
-    ramp_epochs = 300
+    ramp_epochs = 400
     beta_target = 1.0
     
     model.load_state_dict(torch.load(phase1_complete_path, map_location=device))
