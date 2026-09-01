@@ -16,6 +16,24 @@ from LNP.LATNPsimple import LatNP_simple
 from LNP.loss_np import ELBOLossNP
 from LNP.training import train_np
 
+
+def save_sensor_location_plot(test_dataset, sensors, height, width, output_path: Path) -> None:
+    _, frame_history = test_dataset[0]
+    frame = frame_history[-1].reshape(height, width)
+    sensor_rows = [sensor // width for sensor in sensors]
+    sensor_columns = [sensor % width for sensor in sensors]
+
+    figure, axis = plt.subplots(figsize=(8, 5))
+    axis.imshow(frame, cmap="gray")
+    axis.scatter(sensor_columns, sensor_rows, marker="x", s=100, c="cyan", linewidths=2)
+    axis.set_title("GoPro sensor locations")
+    axis.axis("off")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(figure)
+    print(f"Saved sensor location plot to {output_path}")
+
+
 def print_max_history_test_result(model, test_dataset, coords, sensors, height, width, device, output_path: Path) -> None:
     x_context, y_context, x_target, y_target = np_eval_inputs(
         [test_dataset[0]], coords, sensors, history=DEFAULT_HISTORY_LENGTH
@@ -65,6 +83,9 @@ def main() -> None:
     print(f"[GoPro LNP] Checkpoint directory: {checkpoints}")
     print("[GoPro LNP] Preparing GoPro data...")
     datasets, coords, sensors, _, height, width, _, _ = prepare_data(data_dir)
+    save_sensor_location_plot(
+        datasets["test"], sensors, height, width, checkpoints / "sensor_locations.png"
+    )
     print("[GoPro LNP] Building train/validation loaders...")
     train_loader, val_loader = make_np_loaders(datasets, coords, sensors, batch_size=32)
     print(f"[GoPro LNP] Train batches: {len(train_loader)}, Validation batches: {len(val_loader)}")
