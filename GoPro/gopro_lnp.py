@@ -141,7 +141,7 @@ def main() -> None:
     for param in model.latent.parameters():
         param.requires_grad = True
     
-    optimizer_p2 = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=0.0)
+    optimizer_p2 = torch.optim.Adam(model.parameters(), lr=2e-4, weight_decay=0.0)
     scheduler_p2 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_p2, mode="min", factor=0.5, patience=64, min_lr=1e-6)
     beta_schedule_p2 = [beta_target * (e / ramp_epochs) for e in range(ramp_epochs)] + [beta_target] * (epochs_p2 - ramp_epochs)
     p2_checkpoints_dir = checkpoints / "phase2"
