@@ -102,10 +102,10 @@ def main() -> None:
     # PHASE 1: DETERMINISTIC WARMUP (Beta = 0)
     # =====================================================================
     print("\n" + "="*60)
-    print("PHASE 1: DETERMINISTIC WARMUP (100 Epochs)")
+    print("PHASE 1: DETERMINISTIC WARMUP (200 Epochs)")
     print("="*60)
     
-    epochs_p1 = 100
+    epochs_p1 = 200
     optimizer_p1 = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=2e-4, weight_decay=0.0)
     beta_schedule_p1 = [0.0] * epochs_p1
     p1_checkpoints_dir = checkpoints / "phase1"
@@ -133,15 +133,15 @@ def main() -> None:
     print("PHASE 2: STOCHASTIC FINE-TUNING (600 Epochs)")
     print("="*60)
     
-    epochs_p2 = 600
-    ramp_epochs = 400
+    epochs_p2 = 800
+    ramp_epochs = 600
     beta_target = 1.0
     
     model.load_state_dict(torch.load(phase1_complete_path, map_location=device))
     for param in model.latent.parameters():
         param.requires_grad = True
     
-    optimizer_p2 = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
+    optimizer_p2 = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=0.0)
     scheduler_p2 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_p2, mode="min", factor=0.5, patience=64, min_lr=1e-6)
     beta_schedule_p2 = [beta_target * (e / ramp_epochs) for e in range(ramp_epochs)] + [beta_target] * (epochs_p2 - ramp_epochs)
     p2_checkpoints_dir = checkpoints / "phase2"
