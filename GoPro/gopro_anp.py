@@ -91,7 +91,7 @@ def main() -> None:
     train_np(
         train_loader, model, optimizer_p1, ELBOLossNP(beta=1.0), device,
         epochs=epochs_p1, val_loader=val_loader, scheduler=None, gradient_clip=1.0,
-        early_stopping_patience=1000, is_meta_learning=True, verbose=True, print_every=10,
+        early_stopping_patience=500, is_meta_learning=True, verbose=True, print_every=10,
         checkpoint_dir=str(p1_checkpoints_dir), beta_schedule=beta_schedule_p1,
         early_stopping_start_epoch=epochs_p1 + 1,
         on_epoch_start=lambda _: set_epoch_targets(
@@ -127,7 +127,7 @@ def main() -> None:
     history = train_np(
         train_loader, model, optimizer_p2, ELBOLossNP(beta=1.0), device,
         epochs=epochs_p2, val_loader=val_loader, scheduler=scheduler_p2, gradient_clip=1.0,
-        early_stopping_patience=1000, is_meta_learning=True, verbose=True, print_every=10,
+        early_stopping_patience=500, is_meta_learning=True, verbose=True, print_every=10,
         checkpoint_dir=str(p2_checkpoints_dir), beta_schedule=beta_schedule_p2,
         early_stopping_start_epoch=ramp_epochs,
         on_epoch_start=lambda _: set_epoch_targets(
