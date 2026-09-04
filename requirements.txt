@@ -18,4 +18,7 @@ tqdm
 # Used by compare_loglikelihood.py
 gpytorch
 
+# Used only by RTI/export_rti.py to read The Well data.
+the-well
+
 # FEniCS / dolfin is required separately and is intentionally not listed here.
