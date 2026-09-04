@@ -95,7 +95,7 @@ def main() -> None:
         checkpoint_dir=str(p1_checkpoints_dir), beta_schedule=beta_schedule_p1,
         early_stopping_start_epoch=epochs_p1 + 1,
         on_epoch_start=lambda _: set_epoch_targets(
-            coords.shape[0], sensors, num_target=128, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
+            coords.shape[0], sensors, num_target=2048, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
         ),
     )
     
@@ -111,7 +111,7 @@ def main() -> None:
     print("="*60)
     
     epochs_p2 = 2500
-    ramp_epochs = 1000
+    ramp_epochs = 1500
     beta_target = 1.0
     
     model.load_state_dict(torch.load(phase1_complete_path, map_location=device))
@@ -119,7 +119,7 @@ def main() -> None:
         param.requires_grad = True
     
     optimizer_p2 = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
-    scheduler_p2 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_p2, mode="min", factor=0.5, patience=256, min_lr=1e-6)
+    scheduler_p2 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer_p2, mode="min", factor=0.5, patience=64, min_lr=1e-6)
     beta_schedule_p2 = [beta_target * (e / ramp_epochs) for e in range(ramp_epochs)] + [beta_target] * (epochs_p2 - ramp_epochs)
     p2_checkpoints_dir = checkpoints / "phase2"
     p2_checkpoints_dir.mkdir(parents=True, exist_ok=True)
@@ -131,7 +131,7 @@ def main() -> None:
         checkpoint_dir=str(p2_checkpoints_dir), beta_schedule=beta_schedule_p2,
         early_stopping_start_epoch=ramp_epochs,
         on_epoch_start=lambda _: set_epoch_targets(
-            coords.shape[0], sensors, num_target=128, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
+            coords.shape[0], sensors, num_target=2048, history_options=(10, 20, 30, 40), drop_sensor_options=(0, 1),
         ),
     )
     
