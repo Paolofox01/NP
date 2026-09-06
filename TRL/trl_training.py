@@ -19,6 +19,33 @@ from LNP.loss_np import ELBOLossNP
 from LNP.training import train_np
 
 
+def save_sensor_locations(
+    coordinates: torch.Tensor,
+    sensors: torch.Tensor,
+    spatial_shape: tuple[int, int],
+    output_dir: Path,
+) -> None:
+    sensor_coordinates = coordinates[sensors].reshape(-1, 2)
+    figure, axis = plt.subplots(figsize=(8, 4))
+    axis.scatter(coordinates[:, 1], coordinates[:, 0], s=1, alpha=0.12, color="gray")
+    axis.scatter(
+        sensor_coordinates[:, 1], sensor_coordinates[:, 0],
+        s=45, color="magenta", edgecolors="black", linewidths=0.7,
+    )
+    for index, (x_coord, y_coord) in zip(sensors.tolist(), sensor_coordinates.tolist()):
+        axis.annotate(str(index), (y_coord, x_coord), fontsize=7, xytext=(3, 3), textcoords="offset points")
+    axis.set_xlabel("y coordinate")
+    axis.set_ylabel("x coordinate")
+    axis.set_title(f"TRL sensor locations ({len(sensors)} sensors, grid {spatial_shape[0]}x{spatial_shape[1]})")
+    axis.set_aspect("equal")
+    figure.tight_layout()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "sensor_locations.png"
+    figure.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(figure)
+    print(f"Saved TRL sensor locations to {output_path}")
+
+
 def train_trl_model(
     model_class: type[nn.Module],
     model_name: str,
@@ -34,6 +61,7 @@ def train_trl_model(
     print(f"[TRL {model_name}] Loading full 2D density data...")
     datasets, coordinates, spatial_shape = prepare_data(data_dir, DEFAULT_DATA_FILENAME)
     sensors = choose_sensors(len(coordinates), num_sensors)
+    save_sensor_locations(coordinates, sensors, spatial_shape, checkpoints)
     train_loader, val_loader = make_loaders(
         datasets, coordinates, sensors, batch_size=batch_size, num_target_points=num_target_points
     )
