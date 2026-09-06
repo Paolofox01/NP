@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
 import torch
 import torch.nn as nn
 
@@ -46,6 +47,27 @@ def save_sensor_locations(
     print(f"Saved TRL sensor locations to {output_path}")
 
 
+def save_test_trajectory_gif(test_trajectory: torch.Tensor, output_dir: Path) -> None:
+    frames = test_trajectory.detach().cpu().numpy()
+    value_min, value_max = frames.min(), frames.max()
+    figure, axis = plt.subplots(figsize=(7, 4))
+    image = axis.imshow(frames[0], cmap="viridis", vmin=value_min, vmax=value_max, animated=True)
+    axis.set_title("TRL test density trajectory, frame 0")
+    axis.axis("off")
+
+    def update(frame_index: int):
+        image.set_array(frames[frame_index])
+        axis.set_title(f"TRL test density trajectory, frame {frame_index}")
+        return (image,)
+
+    animation = FuncAnimation(figure, update, frames=len(frames), interval=100, blit=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "test_density_trajectory.gif"
+    animation.save(output_path, writer=PillowWriter(fps=10))
+    plt.close(figure)
+    print(f"Saved TRL test trajectory GIF to {output_path}")
+
+
 def train_trl_model(
     model_class: type[nn.Module],
     model_name: str,
@@ -61,6 +83,7 @@ def train_trl_model(
     print(f"[TRL {model_name}] Loading full 2D density data...")
     datasets, coordinates, spatial_shape = prepare_data(data_dir, DEFAULT_DATA_FILENAME)
     sensors = choose_sensors(len(coordinates), num_sensors)
+    save_test_trajectory_gif(datasets["test"][0], checkpoints)
     save_sensor_locations(coordinates, sensors, spatial_shape, checkpoints)
     train_loader, val_loader = make_loaders(
         datasets, coordinates, sensors, batch_size=batch_size, num_target_points=num_target_points
@@ -109,6 +132,7 @@ def train_trl_model(
     model.load_state_dict(best_checkpoint["model_state_dict"])
     model.eval()
     print_max_history_test_result(model, datasets, coordinates, sensors, spatial_shape, device, checkpoints)
+
 
 
 def print_max_history_test_result(
