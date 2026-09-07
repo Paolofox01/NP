@@ -47,18 +47,31 @@ def save_sensor_locations(
     print(f"Saved TRL sensor locations to {output_path}")
 
 
-def save_test_trajectory_gif(test_trajectory: torch.Tensor, output_dir: Path) -> None:
+def save_test_trajectory_gif(
+    test_trajectory: torch.Tensor,
+    output_dir: Path,
+    coordinates: torch.Tensor | None = None,
+    sensors: torch.Tensor | None = None,
+    show_sensors: bool = True,
+) -> None:
     frames = test_trajectory.detach().cpu().numpy()
     value_min, value_max = frames.min(), frames.max()
     figure, axis = plt.subplots(figsize=(7, 4))
     image = axis.imshow(frames[0], cmap="viridis", vmin=value_min, vmax=value_max, animated=True)
+    sensor_scatter = None
+    if show_sensors and coordinates is not None and sensors is not None:
+        sensor_coordinates = coordinates[sensors].reshape(-1, 2).cpu().numpy()
+        sensor_scatter = axis.scatter(
+            sensor_coordinates[:, 1], sensor_coordinates[:, 0],
+            s=45, color="magenta", edgecolors="black", linewidths=0.7,
+        )
     axis.set_title("TRL test density trajectory, frame 0")
     axis.axis("off")
 
     def update(frame_index: int):
         image.set_array(frames[frame_index])
         axis.set_title(f"TRL test density trajectory, frame {frame_index}")
-        return (image,)
+        return (image, sensor_scatter) if sensor_scatter is not None else (image,)
 
     animation = FuncAnimation(figure, update, frames=len(frames), interval=100, blit=True)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -83,8 +96,8 @@ def train_trl_model(
     print(f"[TRL {model_name}] Loading full 2D density data...")
     datasets, coordinates, spatial_shape = prepare_data(data_dir, DEFAULT_DATA_FILENAME)
     sensors = choose_sensors(len(coordinates), num_sensors)
-    save_test_trajectory_gif(datasets["test"][0], checkpoints)
     save_sensor_locations(coordinates, sensors, spatial_shape, checkpoints)
+    save_test_trajectory_gif(datasets["test"][0], checkpoints, coordinates, sensors)
     train_loader, val_loader = make_loaders(
         datasets, coordinates, sensors, batch_size=batch_size, num_target_points=num_target_points
     )
