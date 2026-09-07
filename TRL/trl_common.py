@@ -56,11 +56,47 @@ def prepare_data(data_dir: Path, data_filename: str = DEFAULT_DATA_FILENAME):
     return datasets, coordinates, first_field.shape[1:]
 
 
-def choose_sensors(nstate: int, num_sensors: int = DEFAULT_SENSORS, seed: int = 0) -> torch.Tensor:
+def choose_sensors(
+    nstate: int,
+    num_sensors: int = DEFAULT_SENSORS,
+    seed: int = 0,
+    spatial_shape: tuple[int, int] | None = None,
+) -> torch.Tensor:
+    """Pick sensor node indices, stratified across the grid when a spatial shape is given.
+
+    A plain ``randperm`` over a large, elongated domain can by chance draw all of its
+    (few) samples from one corner; splitting the grid into cells and drawing one sensor
+    per cell guarantees coverage across both spatial dimensions.
+    """
     if not 1 <= num_sensors <= nstate:
         raise ValueError(f"num_sensors must be in [1, {nstate}], got {num_sensors}.")
     generator = torch.Generator().manual_seed(seed)
-    return torch.randperm(nstate, generator=generator)[:num_sensors].sort().values
+    if spatial_shape is None:
+        return torch.randperm(nstate, generator=generator)[:num_sensors].sort().values
+
+    rows, cols = spatial_shape
+    if rows * cols != nstate:
+        raise ValueError(f"spatial_shape {spatial_shape} does not match nstate {nstate}.")
+
+    grid_cols = max(1, round((num_sensors * cols / rows) ** 0.5))
+    grid_rows = max(1, -(-num_sensors // grid_cols))  # ceil division
+    row_bounds = torch.linspace(0, rows, grid_rows + 1).round().long()
+    col_bounds = torch.linspace(0, cols, grid_cols + 1).round().long()
+
+    cell_choices = []
+    for row_start, row_end in zip(row_bounds[:-1].tolist(), row_bounds[1:].tolist()):
+        if row_end <= row_start:
+            continue
+        for col_start, col_end in zip(col_bounds[:-1].tolist(), col_bounds[1:].tolist()):
+            if col_end <= col_start:
+                continue
+            row_pick = row_start + torch.randint(row_end - row_start, (1,), generator=generator).item()
+            col_pick = col_start + torch.randint(col_end - col_start, (1,), generator=generator).item()
+            cell_choices.append(row_pick * cols + col_pick)
+
+    cell_order = torch.randperm(len(cell_choices), generator=generator)[:num_sensors]
+    sensors = torch.as_tensor(cell_choices, dtype=torch.long)[cell_order]
+    return sensors.sort().values
 
 
 def trl_collate_fn(

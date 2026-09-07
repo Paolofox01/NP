@@ -95,7 +95,7 @@ def train_trl_model(
     checkpoints = data_dir / f"checkpoints_trl_{model_name.lower()}"
     print(f"[TRL {model_name}] Loading full 2D density data...")
     datasets, coordinates, spatial_shape = prepare_data(data_dir, DEFAULT_DATA_FILENAME)
-    sensors = choose_sensors(len(coordinates), num_sensors)
+    sensors = choose_sensors(len(coordinates), num_sensors, spatial_shape=spatial_shape)
     save_sensor_locations(coordinates, sensors, spatial_shape, checkpoints)
     save_test_trajectory_gif(datasets["test"][0], checkpoints, coordinates, sensors)
     train_loader, val_loader = make_loaders(
