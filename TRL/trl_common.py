@@ -61,27 +61,42 @@ def choose_sensors(
     num_sensors: int = DEFAULT_SENSORS,
     seed: int = 0,
     spatial_shape: tuple[int, int] | None = None,
+    col_fraction_range: tuple[float, float] | None = None,
 ) -> torch.Tensor:
     """Pick sensor node indices, stratified across the grid when a spatial shape is given.
 
     A plain ``randperm`` over a large, elongated domain can by chance draw all of its
     (few) samples from one corner; splitting the grid into cells and drawing one sensor
-    per cell guarantees coverage across both spatial dimensions.
+    per cell guarantees coverage across both spatial dimensions. ``col_fraction_range``
+    restricts sensors to a horizontal band (e.g. ``(1/3, 1/2)``) while still spreading
+    them across the full vertical extent, useful for targeting a known interface region.
     """
     if not 1 <= num_sensors <= nstate:
         raise ValueError(f"num_sensors must be in [1, {nstate}], got {num_sensors}.")
     generator = torch.Generator().manual_seed(seed)
     if spatial_shape is None:
+        if col_fraction_range is not None:
+            raise ValueError("col_fraction_range requires spatial_shape.")
         return torch.randperm(nstate, generator=generator)[:num_sensors].sort().values
 
     rows, cols = spatial_shape
     if rows * cols != nstate:
         raise ValueError(f"spatial_shape {spatial_shape} does not match nstate {nstate}.")
 
-    grid_cols = max(1, round((num_sensors * cols / rows) ** 0.5))
+    if col_fraction_range is None:
+        col_lo, col_hi = 0, cols
+    else:
+        low_frac, high_frac = col_fraction_range
+        if not 0.0 <= low_frac < high_frac <= 1.0:
+            raise ValueError(f"col_fraction_range must satisfy 0 <= low < high <= 1, got {col_fraction_range}.")
+        col_lo = int(round(low_frac * cols))
+        col_hi = max(int(round(high_frac * cols)), col_lo + 1)
+    band_cols = col_hi - col_lo
+
+    grid_cols = max(1, round((num_sensors * band_cols / rows) ** 0.5))
     grid_rows = max(1, -(-num_sensors // grid_cols))  # ceil division
     row_bounds = torch.linspace(0, rows, grid_rows + 1).round().long()
-    col_bounds = torch.linspace(0, cols, grid_cols + 1).round().long()
+    col_bounds = torch.linspace(col_lo, col_hi, grid_cols + 1).round().long()
 
     cell_choices = []
     for row_start, row_end in zip(row_bounds[:-1].tolist(), row_bounds[1:].tolist()):
