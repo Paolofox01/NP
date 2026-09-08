@@ -90,9 +90,9 @@ def train_trl_model(
     batch_size: int = 8,
     num_target_points: int = DEFAULT_TARGET_POINTS,
     num_sensors: int = DEFAULT_SENSORS,
-    phase1_epochs: int = 1000,
-    phase2_epochs: int = 5000,
-    ramp_epochs: int = 3000,
+    phase1_epochs: int = 500,
+    phase2_epochs: int = 2500,
+    ramp_epochs: int = 1000,
 ) -> None:
     data_dir = Path(__file__).resolve().parent
     checkpoints = data_dir / f"checkpoints_trl_{model_name.lower()}"
