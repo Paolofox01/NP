@@ -102,7 +102,7 @@ def train_trl_model(
         len(coordinates), num_sensors, spatial_shape=spatial_shape, col_fraction_range=(1 / 3, 1 / 2)
     )
     save_sensor_locations(coordinates, sensors, spatial_shape, checkpoints)
-    save_test_trajectory_gif(datasets["test"][0], checkpoints, spatial_shape, sensors)
+    save_test_trajectory_gif(datasets["test"].fields[0], checkpoints, spatial_shape, sensors)
     train_loader, val_loader = make_loaders(
         datasets, coordinates, sensors, batch_size=batch_size, num_target_points=num_target_points,
         boundary_col_fraction_range=(1 / 3, 1 / 2), boundary_target_fraction=0.6,
@@ -163,7 +163,7 @@ def print_max_history_test_result(
     device: torch.device,
     output_dir: Path,
 ) -> None:
-    test_trajectory = datasets["test"][0]
+    test_trajectory = datasets["test"].fields[0]
     time_index = test_trajectory.shape[0] - 1
     lag = min(19, time_index - 1)
     cooling_timescale = datasets["test"].cooling_timescales[0]
