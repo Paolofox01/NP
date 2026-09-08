@@ -51,9 +51,16 @@ def prepare_data(data_dir: Path, data_filename: str = DEFAULT_DATA_FILENAME):
         datasets = {
             name: TRLDataset(torch.from_numpy(data[name])) for name in ("train", "valid", "test")
         }
+    # Normalize using train-split statistics so the raw physical density scale
+    # doesn't mismatch the model's near-unit-scale output/variance initialization.
+    data_min = datasets["train"].fields.min()
+    data_max = datasets["train"].fields.max()
+    for dataset in datasets.values():
+        dataset.fields = (dataset.fields - data_min) / (data_max - data_min + 1e-8)
     first_field = datasets["train"].fields[0]
     coordinates = build_grid(first_field.shape[1:])
     return datasets, coordinates, first_field.shape[1:]
+
 
 
 def choose_sensors(
