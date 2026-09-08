@@ -113,7 +113,7 @@ def train_trl_model(
     print(f"[TRL {model_name}] Target points per batch: {num_target_points}")
 
     model = model_class(
-        x_dim=3, y_dim=1, r_dim=128, z_dim=128, hidden_dim=128, n_hidden=2,
+        x_dim=3, y_dim=1, r_dim=128, z_dim=256, hidden_dim=256, n_hidden=2,
         activation=nn.ReLU, is_normalized=True, norm_type="layer", fourier_vars=3,
         num_frequencies=64, learnable_fourier=True, use_deeponet_decoder=False,
     ).to(device)

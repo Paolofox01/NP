@@ -158,7 +158,7 @@ def trl_collate_fn(
     mesh_coords: torch.Tensor,
     sensor_locations: torch.Tensor,
     num_target_points: int = DEFAULT_TARGET_POINTS,
-    history_options: tuple = (0, 2, 4, 9),
+    history_options: tuple = (4, 9),
     boundary_col_fraction_range: tuple[float, float] | None = None,
     boundary_target_fraction: float = 0.5,
 ):
