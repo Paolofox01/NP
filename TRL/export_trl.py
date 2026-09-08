@@ -8,6 +8,12 @@ import numpy as np
 
 WELL_DATASET_NAME = "turbulent_radiative_layer_2D"
 FIELD_NAME = "density"
+COOLING_TIMESCALE_NAMES = (
+    "cooling_timescale",
+    "cooling_time",
+    "cooling_timescale_coefficient",
+    "cooling_coefficient",
+)
 DEFAULT_OUTPUT = "trl_density.npz"
 
 
@@ -54,6 +60,33 @@ def _extract_field_array(dataset, max_trajectories: int | None) -> np.ndarray:
     return np.asarray(field.transpose("sample", "time", *spatial_dims).values, dtype=np.float32)
 
 
+def _extract_cooling_timescale(dataset, max_trajectories: int | None) -> np.ndarray:
+    arrays = dataset.to_xarray(backend="numpy")
+    cooling_name = next((name for name in COOLING_TIMESCALE_NAMES if name in arrays), None)
+    if cooling_name is None:
+        available = ", ".join(arrays.data_vars)
+        raise KeyError(
+            "Could not find the TRL cooling-timescale coefficient. "
+            f"Tried {COOLING_TIMESCALE_NAMES}; available variables: {available}"
+        )
+
+    coefficient = arrays[cooling_name]
+    if "sample" not in coefficient.dims:
+        raise ValueError(
+            f"Expected {cooling_name!r} to have a sample dimension, got {coefficient.dims}."
+        )
+    if max_trajectories is not None:
+        coefficient = coefficient.isel(sample=slice(0, max_trajectories))
+    coefficient = np.asarray(coefficient.values, dtype=np.float32)
+    if coefficient.ndim == 1:
+        return coefficient
+    if coefficient.ndim == 2 and coefficient.shape[1] == 1:
+        return coefficient[:, 0]
+    raise ValueError(
+        f"Expected {cooling_name!r} to be one scalar per trajectory, got shape {coefficient.shape}."
+    )
+
+
 def export_density_fields(
     well_base_path: str,
     output_path: Path,
@@ -67,10 +100,12 @@ def export_density_fields(
 
     split_limits = {"train": max_train, "valid": max_valid, "test": max_test}
     split_arrays = {}
+    cooling_timescales = {}
     for split, max_trajectories in split_limits.items():
         print(f"[TRL export] Loading {split} split from {well_base_path}...")
         dataset = load_well_dataset(well_base_path, split, max_trajectories)
         split_arrays[split] = _extract_field_array(dataset, max_trajectories)
+        cooling_timescales[split] = _extract_cooling_timescale(dataset, max_trajectories)
         print(f"[TRL export] {split}: {split_arrays[split].shape}")
 
     shapes = {name: array.shape[-2:] for name, array in split_arrays.items()}
@@ -82,6 +117,9 @@ def export_density_fields(
         train=split_arrays["train"],
         valid=split_arrays["valid"],
         test=split_arrays["test"],
+        train_cooling_timescale=cooling_timescales["train"],
+        valid_cooling_timescale=cooling_timescales["valid"],
+        test_cooling_timescale=cooling_timescales["test"],
         field=np.asarray(FIELD_NAME),
         source_dataset=np.asarray(WELL_DATASET_NAME),
     )

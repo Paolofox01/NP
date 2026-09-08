@@ -113,7 +113,7 @@ def train_trl_model(
     print(f"[TRL {model_name}] Target points per batch: {num_target_points}")
 
     model = model_class(
-        x_dim=3, y_dim=1, r_dim=128, z_dim=256, hidden_dim=256, n_hidden=2,
+        x_dim=4, y_dim=1, r_dim=128, z_dim=256, hidden_dim=256, n_hidden=2,
         activation=nn.ReLU, is_normalized=True, norm_type="layer", fourier_vars=3,
         num_frequencies=64, learnable_fourier=True, use_deeponet_decoder=False,
     ).to(device)
@@ -166,8 +166,9 @@ def print_max_history_test_result(
     test_trajectory = datasets["test"][0]
     time_index = test_trajectory.shape[0] - 1
     lag = min(19, time_index - 1)
+    cooling_timescale = datasets["test"].cooling_timescales[0]
     x_context, y_context, x_target, y_target = eval_inputs(
-        test_trajectory, coordinates, sensors, time_index=time_index, lag=lag
+        test_trajectory, cooling_timescale, coordinates, sensors, time_index=time_index, lag=lag
     )
     x_context, y_context, x_target, y_target = (
         tensor.to(device) for tensor in (x_context, y_context, x_target, y_target)

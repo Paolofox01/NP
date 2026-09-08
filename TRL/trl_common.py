@@ -16,19 +16,22 @@ DEFAULT_TARGET_POINTS = 4096
 class TRLDataset(Dataset):
     """One full turbulent radiative layer density trajectory per sample."""
 
-    def __init__(self, fields: torch.Tensor):
+    def __init__(self, fields: torch.Tensor, cooling_timescales: torch.Tensor):
         if fields.ndim != 4:
             raise ValueError(
                 "Expected TRL fields with shape (trajectories, time, x, y), "
                 f"got {tuple(fields.shape)}."
             )
         self.fields = fields.float()
+        if cooling_timescales.ndim != 1 or len(cooling_timescales) != len(fields):
+            raise ValueError("Cooling timescales must contain one scalar per trajectory.")
+        self.cooling_timescales = cooling_timescales.float()
 
     def __len__(self) -> int:
         return len(self.fields)
 
-    def __getitem__(self, index: int) -> torch.Tensor:
-        return self.fields[index]
+    def __getitem__(self, index: int):
+        return self.fields[index], self.cooling_timescales[index]
 
 
 def build_grid(shape: tuple[int, int]) -> torch.Tensor:
@@ -49,7 +52,11 @@ def prepare_data(data_dir: Path, data_filename: str = DEFAULT_DATA_FILENAME):
         )
     with np.load(data_path) as data:
         datasets = {
-            name: TRLDataset(torch.from_numpy(data[name])) for name in ("train", "valid", "test")
+            name: TRLDataset(
+                torch.from_numpy(data[name]),
+                torch.from_numpy(data[f"{name}_cooling_timescale"]),
+            )
+            for name in ("train", "valid", "test")
         }
     # Normalize using train-split statistics so the raw physical density scale
     # doesn't mismatch the model's near-unit-scale output/variance initialization.
@@ -57,6 +64,12 @@ def prepare_data(data_dir: Path, data_filename: str = DEFAULT_DATA_FILENAME):
     data_max = datasets["train"].fields.max()
     for dataset in datasets.values():
         dataset.fields = (dataset.fields - data_min) / (data_max - data_min + 1e-8)
+    parameter_min = datasets["train"].cooling_timescales.min()
+    parameter_max = datasets["train"].cooling_timescales.max()
+    for dataset in datasets.values():
+        dataset.cooling_timescales = (dataset.cooling_timescales - parameter_min) / (
+            parameter_max - parameter_min + 1e-8
+        )
     first_field = datasets["train"].fields[0]
     coordinates = build_grid(first_field.shape[1:])
     return datasets, coordinates, first_field.shape[1:]
@@ -163,7 +176,9 @@ def trl_collate_fn(
     boundary_target_fraction: float = 0.5,
 ):
     """Create sparse 2D context-target batches with [t, x, y] coordinates."""
-    trajectories = torch.stack(batch).float()
+    trajectories, cooling_timescales = zip(*batch)
+    trajectories = torch.stack(trajectories).float()
+    cooling_timescales = torch.stack(cooling_timescales).float()
     batch_size, ntimes, *spatial_shape = trajectories.shape
     fields = trajectories.reshape(batch_size, ntimes, -1)
     nstate = fields.shape[-1]
@@ -186,15 +201,21 @@ def trl_collate_fn(
 
     x_context = torch.cat(
         [
-            ((context_time_indices - time_index).float() / ntimes).unsqueeze(-1),
-            mesh_coords[context_state_indices],
+            cooling_timescales[:, None, None].expand(batch_size, context_time_indices.numel(), 1),
+            ((context_time_indices - time_index).float() / ntimes)
+            .unsqueeze(-1).unsqueeze(0).expand(batch_size, -1, -1),
+            mesh_coords[context_state_indices].unsqueeze(0).expand(batch_size, -1, -1),
         ],
         dim=-1,
-    ).unsqueeze(0).expand(batch_size, -1, -1)
+    )
     x_target = torch.cat(
-        [torch.zeros((target_count, 1)), mesh_coords[target_indices]],
+        [
+            cooling_timescales[:, None, None].expand(batch_size, len(target_indices), 1),
+            torch.zeros((batch_size, len(target_indices), 1)),
+            mesh_coords[target_indices].unsqueeze(0).expand(batch_size, -1, -1),
+        ],
         dim=-1,
-    ).unsqueeze(0).expand(batch_size, -1, -1)
+    )
     y_context = fields[:, context_time_indices, context_state_indices].unsqueeze(-1)
     y_target = fields[:, target_times, target_indices].unsqueeze(-1)
     return x_context.contiguous(), y_context.contiguous(), x_target.contiguous(), y_target.contiguous()
@@ -224,6 +245,7 @@ def make_loaders(
 
 def eval_inputs(
     trajectory: torch.Tensor,
+    cooling_timescale: torch.Tensor | float,
     mesh_coords: torch.Tensor,
     sensor_locations: torch.Tensor,
     time_index: int,
@@ -231,6 +253,7 @@ def eval_inputs(
 ):
     """Build one full-field prediction problem for testing."""
     fields = trajectory.float().unsqueeze(0).reshape(1, trajectory.shape[0], -1)
+    cooling_timescale = torch.as_tensor(cooling_timescale, dtype=trajectory.dtype).reshape(1)
     ntimes, nstate = fields.shape[1:]
     sensors = sensor_locations.long()
     if not 0 <= lag < time_index < ntimes:
@@ -244,13 +267,18 @@ def eval_inputs(
 
     x_context = torch.cat(
         [
+            cooling_timescale.expand(context_time_indices.numel()).unsqueeze(-1),
             ((context_time_indices - time_index).float() / ntimes).unsqueeze(-1),
             mesh_coords[context_state_indices],
         ],
         dim=-1,
     ).unsqueeze(0)
     x_target = torch.cat(
-        [torch.zeros((nstate, 1)), mesh_coords[target_indices]],
+        [
+            cooling_timescale.expand(nstate).unsqueeze(-1),
+            torch.zeros((nstate, 1)),
+            mesh_coords[target_indices],
+        ],
         dim=-1,
     ).unsqueeze(0)
     y_context = fields[:, context_time_indices, context_state_indices].unsqueeze(-1)
