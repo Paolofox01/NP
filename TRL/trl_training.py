@@ -87,7 +87,7 @@ def save_test_trajectory_gif(
 def train_trl_model(
     model_class: type[nn.Module],
     model_name: str,
-    batch_size: int = 8,
+    batch_size: int = 16,
     num_target_points: int = DEFAULT_TARGET_POINTS,
     num_sensors: int = DEFAULT_SENSORS,
     phase1_epochs: int = 500,

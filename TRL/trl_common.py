@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, Dataset
 
 
 DEFAULT_DATA_FILENAME = "trl_density.npz"
-DEFAULT_SENSORS = 16
+DEFAULT_SENSORS = 32
 DEFAULT_TARGET_POINTS = 4096
 
 
