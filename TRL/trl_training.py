@@ -87,7 +87,7 @@ def save_test_trajectory_gif(
 def train_trl_model(
     model_class: type[nn.Module],
     model_name: str,
-    batch_size: int = 2,
+    batch_size: int = 16,
     num_target_points: int = DEFAULT_TARGET_POINTS,
     num_sensors: int = DEFAULT_SENSORS,
     phase1_epochs: int = 500,
@@ -186,6 +186,11 @@ def print_max_history_test_result(
     value_min = min(target_field.min().item(), prediction_field.min().item())
     value_max = max(target_field.max().item(), prediction_field.max().item())
 
+    # imshow uses raw pixel-index axes, so sensors must be plotted in pixel space too.
+    _, cols = spatial_shape
+    sensor_indices = sensors.cpu().numpy()
+    sensor_rows, sensor_cols = sensor_indices // cols, sensor_indices % cols
+
     figure, axes = plt.subplots(1, 3, figsize=(15, 4))
     for axis, image, title, cmap, vmin, vmax in (
         (axes[0], target_field, "Test target", "viridis", value_min, value_max),
@@ -193,6 +198,7 @@ def print_max_history_test_result(
         (axes[2], variance_field, "Predictive variance", "magma", 0.0, variance_field.max().item()),
     ):
         plot = axis.imshow(image.numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+        axis.scatter(sensor_cols, sensor_rows, marker="x", s=60, c="cyan", linewidths=1.5)
         axis.set_title(title)
         axis.axis("off")
         figure.colorbar(plot, ax=axis, fraction=0.046, pad=0.04)
