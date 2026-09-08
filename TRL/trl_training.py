@@ -104,7 +104,8 @@ def train_trl_model(
     save_sensor_locations(coordinates, sensors, spatial_shape, checkpoints)
     save_test_trajectory_gif(datasets["test"][0], checkpoints, spatial_shape, sensors)
     train_loader, val_loader = make_loaders(
-        datasets, coordinates, sensors, batch_size=batch_size, num_target_points=num_target_points
+        datasets, coordinates, sensors, batch_size=batch_size, num_target_points=num_target_points,
+        boundary_col_fraction_range=(1 / 3, 1 / 2), boundary_target_fraction=0.6,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

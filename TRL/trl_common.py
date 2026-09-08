@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, Dataset
 
 DEFAULT_DATA_FILENAME = "trl_density.npz"
 DEFAULT_SENSORS = 16
-DEFAULT_TARGET_POINTS = 2048
+DEFAULT_TARGET_POINTS = 4096
 
 
 class TRLDataset(Dataset):
@@ -121,12 +121,46 @@ def choose_sensors(
     return sensors.sort().values
 
 
+def sample_target_indices(
+    nstate: int,
+    target_count: int,
+    spatial_shape: tuple[int, int] | None = None,
+    boundary_col_fraction_range: tuple[float, float] | None = None,
+    boundary_target_fraction: float = 0.5,
+) -> torch.Tensor:
+    """Sample target node indices, optionally oversampling a horizontal boundary band.
+
+    Uniform target sampling barely supervises a thin, high-interest band (e.g. a fluid
+    interface): most points land in the much larger surrounding region. Reserving a
+    fraction of targets for the band gives the loss real gradient signal there.
+    """
+    if spatial_shape is None or boundary_col_fraction_range is None:
+        return torch.randperm(nstate)[:target_count]
+
+    rows, cols = spatial_shape
+    low_frac, high_frac = boundary_col_fraction_range
+    col_lo = int(round(low_frac * cols))
+    col_hi = max(int(round(high_frac * cols)), col_lo + 1)
+    col_indices = torch.arange(nstate) % cols
+    boundary_mask = (col_indices >= col_lo) & (col_indices < col_hi)
+    boundary_pool = boundary_mask.nonzero(as_tuple=True)[0]
+    other_pool = (~boundary_mask).nonzero(as_tuple=True)[0]
+
+    boundary_count = min(int(round(target_count * boundary_target_fraction)), len(boundary_pool))
+    rest_count = min(target_count - boundary_count, len(other_pool))
+    boundary_sample = boundary_pool[torch.randperm(len(boundary_pool))[:boundary_count]]
+    rest_sample = other_pool[torch.randperm(len(other_pool))[:rest_count]]
+    return torch.cat([boundary_sample, rest_sample])
+
+
 def trl_collate_fn(
     batch,
     mesh_coords: torch.Tensor,
     sensor_locations: torch.Tensor,
     num_target_points: int = DEFAULT_TARGET_POINTS,
     history_options: tuple = (0, 4, 9, 19),
+    boundary_col_fraction_range: tuple[float, float] | None = None,
+    boundary_target_fraction: float = 0.5,
 ):
     """Create sparse 2D context-target batches with [t, x, y] coordinates."""
     trajectories = torch.stack(batch).float()
@@ -145,8 +179,10 @@ def trl_collate_fn(
     context_time_indices = context_times.repeat_interleave(len(sensors))
 
     target_count = min(num_target_points, nstate)
-    target_indices = torch.randperm(nstate)[:target_count]
-    target_times = torch.full((target_count,), time_index, dtype=torch.long)
+    target_indices = sample_target_indices(
+        nstate, target_count, tuple(spatial_shape), boundary_col_fraction_range, boundary_target_fraction
+    )
+    target_times = torch.full((len(target_indices),), time_index, dtype=torch.long)
 
     x_context = torch.cat(
         [
@@ -170,12 +206,16 @@ def make_loaders(
     sensors: torch.Tensor,
     batch_size: int = 2,
     num_target_points: int = DEFAULT_TARGET_POINTS,
+    boundary_col_fraction_range: tuple[float, float] | None = None,
+    boundary_target_fraction: float = 0.5,
 ):
     collate = partial(
         trl_collate_fn,
         mesh_coords=mesh_coords,
         sensor_locations=sensors,
         num_target_points=num_target_points,
+        boundary_col_fraction_range=boundary_col_fraction_range,
+        boundary_target_fraction=boundary_target_fraction,
     )
     train_loader = DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate)
     val_loader = DataLoader(datasets["valid"], batch_size=batch_size, shuffle=False, collate_fn=collate)
