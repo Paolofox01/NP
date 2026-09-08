@@ -9,6 +9,7 @@ import numpy as np
 WELL_DATASET_NAME = "turbulent_radiative_layer_2D"
 FIELD_NAME = "density"
 COOLING_TIMESCALE_NAMES = (
+    "tcool",
     "cooling_timescale",
     "cooling_time",
     "cooling_timescale_coefficient",
