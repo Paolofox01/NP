@@ -113,8 +113,8 @@ def train_trl_model(
     print(f"[TRL {model_name}] Target points per batch: {num_target_points}")
 
     model = model_class(
-        x_dim=4, y_dim=1, r_dim=128, z_dim=128, hidden_dim=128, n_hidden=2,
-        activation=nn.SiLU, is_normalized=True, norm_type="layer", fourier_vars=3,
+        x_dim=4, y_dim=1, r_dim=256, z_dim=256, hidden_dim=256, n_hidden=3,
+        activation=nn.ReLU, is_normalized=True, norm_type="layer", fourier_vars=3,
         num_frequencies=256, learnable_fourier=True, use_deeponet_decoder=False,
     ).to(device)
     print(f"[TRL {model_name}] Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -165,7 +165,7 @@ def print_max_history_test_result(
 ) -> None:
     test_trajectory = datasets["test"].fields[0]
     time_index = test_trajectory.shape[0] - 1
-    lag = min(19, time_index - 1)
+    lag = min(12, time_index - 1)
     cooling_timescale = datasets["test"].cooling_timescales[0]
     x_context, y_context, x_target, y_target = eval_inputs(
         test_trajectory, cooling_timescale, coordinates, sensors, time_index=time_index, lag=lag

@@ -169,7 +169,7 @@ def sample_target_indices(
     non_required_mask[required] = False
     boundary_mask &= non_required_mask
     boundary_pool = boundary_mask.nonzero(as_tuple=True)[0]
-    other_pool = (~boundary_mask).nonzero(as_tuple=True)[0]
+    other_pool = (~boundary_mask & non_required_mask).nonzero(as_tuple=True)[0]
 
     boundary_count = min(int(round(remaining_count * boundary_target_fraction)), len(boundary_pool))
     rest_count = min(remaining_count - boundary_count, len(other_pool))
