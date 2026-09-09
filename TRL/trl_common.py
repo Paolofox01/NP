@@ -140,6 +140,7 @@ def sample_target_indices(
     spatial_shape: tuple[int, int] | None = None,
     boundary_col_fraction_range: tuple[float, float] | None = None,
     boundary_target_fraction: float = 0.5,
+    required_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Sample target node indices, optionally oversampling a horizontal boundary band.
 
@@ -147,8 +148,15 @@ def sample_target_indices(
     interface): most points land in the much larger surrounding region. Reserving a
     fraction of targets for the band gives the loss real gradient signal there.
     """
+    required = torch.empty(0, dtype=torch.long) if required_indices is None else required_indices.long().unique()
+    if len(required) > target_count:
+        raise ValueError("target_count must be at least the number of required target indices.")
+    remaining_count = target_count - len(required)
     if spatial_shape is None or boundary_col_fraction_range is None:
-        return torch.randperm(nstate)[:target_count]
+        candidates = torch.arange(nstate)
+        candidates = candidates[~torch.isin(candidates, required)]
+        sampled = candidates[torch.randperm(len(candidates))[:remaining_count]]
+        return torch.cat([required, sampled])
 
     rows, cols = spatial_shape
     low_frac, high_frac = boundary_col_fraction_range
@@ -156,14 +164,23 @@ def sample_target_indices(
     col_hi = max(int(round(high_frac * cols)), col_lo + 1)
     col_indices = torch.arange(nstate) % cols
     boundary_mask = (col_indices >= col_lo) & (col_indices < col_hi)
+    boundary_mask[required] = False
+    non_required_mask = torch.ones(nstate, dtype=torch.bool)
+    non_required_mask[required] = False
+    boundary_mask &= non_required_mask
     boundary_pool = boundary_mask.nonzero(as_tuple=True)[0]
     other_pool = (~boundary_mask).nonzero(as_tuple=True)[0]
 
-    boundary_count = min(int(round(target_count * boundary_target_fraction)), len(boundary_pool))
-    rest_count = min(target_count - boundary_count, len(other_pool))
+    boundary_count = min(int(round(remaining_count * boundary_target_fraction)), len(boundary_pool))
+    rest_count = min(remaining_count - boundary_count, len(other_pool))
     boundary_sample = boundary_pool[torch.randperm(len(boundary_pool))[:boundary_count]]
     rest_sample = other_pool[torch.randperm(len(other_pool))[:rest_count]]
-    return torch.cat([boundary_sample, rest_sample])
+    sampled = torch.cat([boundary_sample, rest_sample])
+    if len(sampled) < remaining_count:
+        candidates = torch.arange(nstate)
+        candidates = candidates[~torch.isin(candidates, torch.cat([required, sampled]))]
+        sampled = torch.cat([sampled, candidates[torch.randperm(len(candidates))[:remaining_count - len(sampled)]]])
+    return torch.cat([required, sampled])
 
 
 def trl_collate_fn(
@@ -195,7 +212,8 @@ def trl_collate_fn(
 
     target_count = min(num_target_points, nstate)
     target_indices = sample_target_indices(
-        nstate, target_count, tuple(spatial_shape), boundary_col_fraction_range, boundary_target_fraction
+        nstate, target_count, tuple(spatial_shape), boundary_col_fraction_range, boundary_target_fraction,
+        required_indices=sensors,
     )
     target_times = torch.full((len(target_indices),), time_index, dtype=torch.long)
 
