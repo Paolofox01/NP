@@ -105,7 +105,7 @@ def train_trl_model(
     save_test_trajectory_gif(datasets["test"].fields[0], checkpoints, spatial_shape, sensors)
     train_loader, val_loader = make_loaders(
         datasets, coordinates, sensors, batch_size=batch_size, num_target_points=num_target_points,
-        boundary_col_fraction_range=(1 / 3, 1 / 2), boundary_target_fraction=0.6,
+        boundary_col_fraction_range=(0.30, 0.60), boundary_target_fraction=0.6,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -114,8 +114,8 @@ def train_trl_model(
 
     model = model_class(
         x_dim=4, y_dim=1, r_dim=128, z_dim=128, hidden_dim=128, n_hidden=2,
-        activation=nn.ReLU, is_normalized=True, norm_type="layer", fourier_vars=3,
-        num_frequencies=64, learnable_fourier=True, use_deeponet_decoder=False,
+        activation=nn.SiLU, is_normalized=True, norm_type="layer", fourier_vars=3,
+        num_frequencies=256, learnable_fourier=True, use_deeponet_decoder=False,
     ).to(device)
     print(f"[TRL {model_name}] Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
