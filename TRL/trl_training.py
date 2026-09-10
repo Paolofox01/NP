@@ -112,11 +112,14 @@ def train_trl_model(
     print(f"[TRL {model_name}] Device: {device}; shape: {spatial_shape}; sensors: {len(sensors)}")
     print(f"[TRL {model_name}] Target points per batch: {num_target_points}")
 
-    model = model_class(
+    model_kwargs = dict(
         x_dim=4, y_dim=1, r_dim=256, z_dim=256, hidden_dim=256, n_hidden=3,
         activation=nn.ReLU, is_normalized=True, norm_type="layer", fourier_vars=3,
         num_frequencies=256, learnable_fourier=True, use_deeponet_decoder=False,
-    ).to(device)
+    )
+    if model_class.__name__ == "LatNP":
+        model_kwargs["num_heads"] = 16
+    model = model_class(**model_kwargs).to(device)
     print(f"[TRL {model_name}] Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     phase1_optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
