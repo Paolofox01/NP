@@ -122,7 +122,7 @@ def train_trl_model(
     model = model_class(**model_kwargs).to(device)
     print(f"[TRL {model_name}] Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    phase1_optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
+    phase1_optimizer = torch.optim.Adam(model.parameters(), lr=2e-4, weight_decay=0.0)
     phase1_dir = checkpoints / "phase1"
     train_np(
         train_loader, model, phase1_optimizer, ELBOLossNP(beta=1.0), device,
@@ -136,7 +136,7 @@ def train_trl_model(
     torch.save(model.state_dict(), phase1_path)
 
     model.load_state_dict(torch.load(phase1_path, map_location=device, weights_only=True))
-    phase2_optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=0.0)
+    phase2_optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         phase2_optimizer, mode="min", factor=0.5, patience=256, min_lr=1e-6
     )
