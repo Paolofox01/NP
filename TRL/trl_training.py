@@ -115,7 +115,7 @@ def train_trl_model(
     model_kwargs = dict(
         x_dim=4, y_dim=1, r_dim=256, z_dim=256, hidden_dim=256, n_hidden=3,
         activation=nn.ReLU, is_normalized=True, norm_type="layer", fourier_vars=3,
-        num_frequencies=256, learnable_fourier=True, use_deeponet_decoder=False,
+        num_frequencies=256, learnable_fourier=True, fourier_scale=1.0, use_deeponet_decoder=False,
     )
     if model_class.__name__ == "LatNP":
         model_kwargs["num_heads"] = 16
