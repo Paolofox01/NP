@@ -122,7 +122,7 @@ def train_trl_model(
     model = model_class(**model_kwargs).to(device)
     print(f"[TRL {model_name}] Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    phase1_optimizer = torch.optim.Adam(model.parameters(), lr=2e-4, weight_decay=0.0)
+    phase1_optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
     phase1_dir = checkpoints / "phase1"
     train_np(
         train_loader, model, phase1_optimizer, ELBOLossNP(beta=1.0), device,
