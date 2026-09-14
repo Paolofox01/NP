@@ -191,37 +191,43 @@ def trl_collate_fn(
     history_options: tuple = (0, 2, 4, 8, 12),
     boundary_col_fraction_range: tuple[float, float] | None = None,
     boundary_target_fraction: float = 0.5,
+    total_ntimes: int = 1,
 ):
-    """Create sparse 2D context-target batches with [t, x, y] coordinates."""
-    trajectories, cooling_timescales = zip(*batch)
-    trajectories = torch.stack(trajectories).float()
+    """Batch dim mixes different trajectories AND different time indices
+    (one shared lag per batch, for shape consistency). Expects fixed-length
+    windows from TRLIndexDataset, each ending at its own time index (last row)."""
+    windows, cooling_timescales = zip(*batch)
+    windows = torch.stack(windows).float()
     cooling_timescales = torch.stack(cooling_timescales).float()
-    batch_size, ntimes, *spatial_shape = trajectories.shape
-    fields = trajectories.reshape(batch_size, ntimes, -1)
+    batch_size, window_len, *spatial_shape = windows.shape
+    fields = windows.reshape(batch_size, window_len, -1)
     nstate = fields.shape[-1]
     sensors = sensor_locations.long()
+    max_history = window_len - 1
+    if max_history != max(history_options):
+        raise ValueError(
+            f"history_options={history_options} implies windows of length {max(history_options) + 1}, "
+            f"but got windows of length {window_len}. Build TRLIndexDataset with the same history_options."
+        )
 
-    if ntimes <= max(history_options) + 1:
-        raise ValueError("TRL trajectories are too short for the requested history options.")
-
-    time_index = torch.randint(max(history_options) + 1, ntimes, ()).item()
     lag = history_options[torch.randint(len(history_options), ()).item()]
-    context_times = torch.arange(time_index - lag, time_index + 1)
+    # Every window ends at "now" (local index max_history), so these offsets
+    # are identical across the batch regardless of each item's absolute time.
+    rel_offsets = torch.arange(-lag, 1)
+    local_times = max_history + rel_offsets
     context_state_indices = sensors.repeat(lag + 1)
-    context_time_indices = context_times.repeat_interleave(len(sensors))
+    context_time_indices = local_times.repeat_interleave(len(sensors))
 
     target_count = min(num_target_points, nstate)
     target_indices = sample_target_indices(
         nstate, target_count, tuple(spatial_shape), boundary_col_fraction_range, boundary_target_fraction,
         required_indices=sensors,
     )
-    target_times = torch.full((len(target_indices),), time_index, dtype=torch.long)
 
     x_context = torch.cat(
         [
             cooling_timescales[:, None, None].expand(batch_size, context_time_indices.numel(), 1),
-            ((context_time_indices - time_index).float() / ntimes)
-            .unsqueeze(-1).unsqueeze(0).expand(batch_size, -1, -1),
+            (rel_offsets.float() / total_ntimes).repeat_interleave(len(sensors)).view(1, -1, 1).expand(batch_size, -1, -1),
             mesh_coords[context_state_indices].unsqueeze(0).expand(batch_size, -1, -1),
         ],
         dim=-1,
@@ -235,8 +241,40 @@ def trl_collate_fn(
         dim=-1,
     )
     y_context = fields[:, context_time_indices, context_state_indices].unsqueeze(-1)
-    y_target = fields[:, target_times, target_indices].unsqueeze(-1)
+    y_target = fields[:, -1, target_indices].unsqueeze(-1)
     return x_context.contiguous(), y_context.contiguous(), x_target.contiguous(), y_target.contiguous()
+
+
+class TRLIndexDataset(Dataset):
+    """Flattens (trajectory, valid time index) pairs. Each item is a fixed-length
+    window of max(history_options) + 1 timesteps ending at that time index, since
+    no batch ever needs to look further back than the largest history option. A
+    shuffled DataLoader over this dataset visits every combination once per epoch."""
+
+    def __init__(
+        self,
+        fields: torch.Tensor,
+        cooling_timescales: torch.Tensor,
+        history_options: tuple = (0, 2, 4, 8, 12),
+    ):
+        self.fields = fields
+        self.cooling_timescales = cooling_timescales
+        self.ntimes = fields.shape[1]
+        self.max_history = max(history_options)
+        self.min_time = self.max_history + 1
+        if self.min_time >= self.ntimes:
+            raise ValueError("history_options too large for the trajectory length.")
+        self.n_valid_times = self.ntimes - self.min_time
+
+    def __len__(self) -> int:
+        return self.fields.shape[0] * self.n_valid_times
+
+    def __getitem__(self, index: int):
+        traj_idx, rel_time = divmod(index, self.n_valid_times)
+        time_idx = self.min_time + rel_time
+        # View only (no copy) until the DataLoader stacks the batch.
+        window = self.fields[traj_idx, time_idx - self.max_history : time_idx + 1]
+        return window, self.cooling_timescales[traj_idx]
 
 
 def make_loaders(
@@ -245,19 +283,24 @@ def make_loaders(
     sensors: torch.Tensor,
     batch_size: int = 2,
     num_target_points: int = DEFAULT_TARGET_POINTS,
+    history_options: tuple = (0, 2, 4, 8, 12),
     boundary_col_fraction_range: tuple[float, float] | None = None,
     boundary_target_fraction: float = 0.5,
 ):
+    train_indexed = TRLIndexDataset(datasets["train"].fields, datasets["train"].cooling_timescales, history_options)
+    valid_indexed = TRLIndexDataset(datasets["valid"].fields, datasets["valid"].cooling_timescales, history_options)
     collate = partial(
         trl_collate_fn,
         mesh_coords=mesh_coords,
         sensor_locations=sensors,
         num_target_points=num_target_points,
+        history_options=history_options,
         boundary_col_fraction_range=boundary_col_fraction_range,
         boundary_target_fraction=boundary_target_fraction,
+        total_ntimes=train_indexed.ntimes,
     )
-    train_loader = DataLoader(datasets["train"], batch_size=batch_size, shuffle=True, collate_fn=collate)
-    val_loader = DataLoader(datasets["valid"], batch_size=batch_size, shuffle=False, collate_fn=collate)
+    train_loader = DataLoader(train_indexed, batch_size=batch_size, shuffle=True, collate_fn=collate)
+    val_loader = DataLoader(valid_indexed, batch_size=batch_size, shuffle=False, collate_fn=collate)
     return train_loader, val_loader
 
 
