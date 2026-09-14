@@ -138,14 +138,14 @@ def train_trl_model(
     model.load_state_dict(torch.load(phase1_path, map_location=device, weights_only=True))
     phase2_optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=0.0)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        phase2_optimizer, mode="min", factor=0.5, patience=64, min_lr=1e-6
+        phase2_optimizer, mode="min", factor=0.5, patience=16, min_lr=1e-6
     )
     beta_schedule = [epoch / ramp_epochs for epoch in range(ramp_epochs)] + [1.0] * (phase2_epochs - ramp_epochs)
     phase2_dir = checkpoints / "phase2"
     train_np(
         train_loader, model, phase2_optimizer, ELBOLossNP(beta=1.0), device,
         epochs=phase2_epochs, val_loader=val_loader, scheduler=scheduler, gradient_clip=1.0,
-        early_stopping_patience=100, is_meta_learning=True, verbose=True, print_every=10,
+        early_stopping_patience=32, is_meta_learning=True, verbose=True, print_every=10,
         checkpoint_dir=str(phase2_dir), beta_schedule=beta_schedule,
         early_stopping_start_epoch=ramp_epochs,
     )
