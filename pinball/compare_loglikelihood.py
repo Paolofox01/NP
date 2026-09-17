@@ -552,14 +552,14 @@ def plot_all_distributions(ll_dict, se_dict, sse_dict, mse_dict, out_path, bins=
         "Squared error": se_dict,
         "Per-sample MSE": mse_dict,
     })
-    fig, axes = plt.subplots(4, 2, figsize=(18, 15), gridspec_kw={"width_ratios": [2, 1.25]})
+    fig, axes = plt.subplots(4, 2, figsize=(6.5, 5.5), gridspec_kw={"width_ratios": [2, 1.25]})
     _plot_row(axes[0, 0], axes[0, 1], ll_dict, "Log-Likelihood Distribution", "Per-node log-likelihood", bins, clip_pct, log_scale=False)
     _plot_row(axes[1, 0], axes[1, 1], sse_dict, "Standardized Squared Errors (SSE)", "Per-node SSE", bins, clip_pct, log_scale=False)
     _plot_row(axes[2, 0], axes[2, 1], se_dict, "Squared Error (SE) Distribution", "Per-node Squared Error", bins, clip_pct * 2, log_scale=False)
     _plot_row(axes[3, 0], axes[3, 1], mse_dict, "Mean Squared Errors (MSE)", "Per-sample MSE", bins, clip_pct, log_scale=False)
 
     fig.tight_layout(pad=3.0)
-    plt.subplots_adjust(hspace=0.4, wspace=0.25)
+    plt.subplots_adjust(hspace=0.2, wspace=0.2)
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -627,7 +627,7 @@ def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, 
                 ax.axis('off')
 
             # 2x3 Diagnostic Grid
-            fig, axes = plt.subplots(2, 3, figsize=(30, 16))
+            fig, axes = plt.subplots(2, 3, figsize=(11, 7))
             _local_plot(sample_target, "jet", *color_limits["state"], "Truth", axes[0, 0])
             _local_plot(sample_pred, "jet", *color_limits["state"], "Mean Prediction", axes[0, 1])
             _local_plot(sample_sq_error, "magma", *color_limits["squared_error"], "Squared Error (MSE)", axes[0, 2])
@@ -640,7 +640,7 @@ def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, 
             plt.close(fig)
 
             # 2x5 Monte Carlo Samples Grid
-            fig_mc, axes_mc = plt.subplots(2, 5, figsize=(25, 10))
+            fig_mc, axes_mc = plt.subplots(2, 5, figsize=(11, 4))
             fig_mc.suptitle(f"10 Monte Carlo Samples | Sample {test_indices[batch_idx]} | Lag: {current_lag}", fontsize=22)
             for i in range(10):
                 row, col = i // 5, i % 5
@@ -727,7 +727,7 @@ def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_colla
                 var_clamp = sample_var.clamp_min(1e-8)
                 sample_log_lik = -0.5 * (math.log(2 * math.pi) + torch.log(var_clamp) + sample_sse)
 
-                fig, axes = plt.subplots(2, 3, figsize=(30, 16))
+                fig, axes = plt.subplots(2, 3, figsize=(11, 7))
                 _local_plot(sample_target, "jet", *color_limits["state"], "Truth", axes[0, 0])
                 _local_plot(sample_pred, "jet", *color_limits["state"], "Mean Prediction", axes[0, 1])
                 _local_plot(sample_sq_error, "magma", *color_limits["squared_error"], "Squared Error (MSE)", axes[0, 2])
@@ -736,7 +736,7 @@ def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_colla
                 _local_plot(sample_sse, "magma", *color_limits["standardized_error"], "Standardized SE", axes[1, 2])
                 grid_suffix = "prob_2x3"
             else:
-                fig, axes = plt.subplots(1, 3, figsize=(30, 8))
+                fig, axes = plt.subplots(1, 3, figsize=(11, 4))
                 _local_plot(sample_target, "jet", *color_limits["state"], "Truth", axes[0])
                 _local_plot(sample_pred, "jet", *color_limits["state"], "Prediction", axes[1])
                 _local_plot(sample_sq_error, "magma", *color_limits["squared_error"], "Squared Error", axes[2])
@@ -902,7 +902,7 @@ def main(USE_MU):
     truth_field = Ytest[sample_idx, time_idx].cpu().numpy() if torch.is_tensor(Ytest) else Ytest[sample_idx, time_idx]
     sensor_coords = mesh_coordinates[fixed_sens].cpu().numpy()
 
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, ax = plt.subplots(figsize=(6, 3))
     plot_with_colorbar(truth_field, Yh, ax=ax, cmap="jet", label="True State")
 
     for i, sensor_idx in enumerate(fixed_sens):
