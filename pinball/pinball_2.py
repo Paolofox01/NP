@@ -1406,9 +1406,9 @@ def run_experiment(USE_MU, USE_DEEPONET_DECODER=False):
 
 def main():
     for USE_MU in [True, False]:
-        for USE_DEEPONET_DECODER in [True, False]:
-            print(f"\n{'=' * 80}\nRUNNING EXPERIMENT WITH USE_MU={USE_MU}, USE_DEEPONET_DECODER={USE_DEEPONET_DECODER}\n{'=' * 80}")
-            run_experiment(USE_MU=USE_MU, USE_DEEPONET_DECODER=USE_DEEPONET_DECODER)
+        # for USE_DEEPONET_DECODER in [True, False]:
+            print(f"\n{'=' * 80}\nRUNNING EXPERIMENT WITH USE_MU={USE_MU}\n{'=' * 80}")
+            run_experiment(USE_MU=USE_MU)
 
 if __name__ == "__main__":
     main()

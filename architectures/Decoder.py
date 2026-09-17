@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 # Export both decoders so they can be imported in your main scripts
-__all__ = ["Decoder", "DeepONetDecoder"]
+__all__ = ["Decoder", "DeepONetDecoder", "SplitDecoder"]
 
 # ==============================================================================
 # 1. THE STANDARD MLP DECODER (Concatenation-based)
@@ -77,6 +77,75 @@ class Decoder(nn.Module):
         y_params = self.decoder(x)
         output1, output2 = torch.chunk(y_params, 2, dim=-1)
         return output1, output2
+
+
+# ==============================================================================
+# 1b. SPLIT-HEAD MLP DECODER (shared trunk, per-group final projection)
+# ==============================================================================
+class SplitDecoder(nn.Module):
+    """Same shared trunk as Decoder, but the final projection is split into
+    independent heads per output group (e.g. one head for a scalar field,
+    another for a vector field), instead of one Linear layer over all channels.
+
+    Output channels are concatenated in the order of `output_groups`, so the
+    caller must ensure that order matches the target tensor's channel order.
+    """
+    def __init__(self,
+                 input_dim: int,
+                 output_groups: list,
+                 hidden_dim: int = 64,
+                 n_hidden: int = 1,
+                 activation: Type[nn.Module] = nn.ReLU,
+                 dropout: float = 0.0,
+                 is_normalized: bool = True,
+                 norm_type: str = 'layer',
+                 norm_position: str = 'pre'):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.output_groups = list(output_groups)
+        self.output_dim = sum(self.output_groups)
+        self.hidden_dim = hidden_dim
+        self.n_hidden = n_hidden
+
+        layers = []
+        curr_dim = input_dim
+        for _ in range(n_hidden):
+            if is_normalized and norm_position == 'pre':
+                if norm_type == 'layer':
+                    layers.append(nn.LayerNorm(curr_dim))
+                elif norm_type == 'batch':
+                    layers.append(nn.BatchNorm1d(curr_dim))
+                else:
+                    raise ValueError(f"norm_type must be 'layer' or 'batch', got '{norm_type}'")
+
+            layers.append(nn.Linear(curr_dim, hidden_dim))
+            layers.append(activation())
+
+            if is_normalized and norm_position == 'post':
+                if norm_type == 'layer':
+                    layers.append(nn.LayerNorm(hidden_dim))
+                elif norm_type == 'batch':
+                    layers.append(nn.BatchNorm1d(hidden_dim))
+                else:
+                    raise ValueError(f"norm_type must be 'layer' or 'batch', got '{norm_type}'")
+
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+
+            curr_dim = hidden_dim
+
+        self.trunk = nn.Sequential(*layers)
+        self.heads = nn.ModuleList([nn.Linear(curr_dim, 2 * group_size) for group_size in self.output_groups])
+
+    def forward(self, x: torch.Tensor) -> tuple:
+        features = self.trunk(x)
+        means, raws = [], []
+        for head in self.heads:
+            mean, raw = torch.chunk(head(features), 2, dim=-1)
+            means.append(mean)
+            raws.append(raw)
+        return torch.cat(means, dim=-1), torch.cat(raws, dim=-1)
 
 
 # ==============================================================================
