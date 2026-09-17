@@ -60,8 +60,8 @@ if IS_KAGGLE:
         "deeponet_mu": KAGGLE_NB1 / "checkpoints_pinball_don_det_with_mu/best_model.pt",
         "deeponet_no_mu": KAGGLE_NB1 / "checkpoints_pinball_don_det_without_mu/best_model.pt",
         "gp": BASE_DATA_DIR / "sensor_history_gp.pth",
-        "shred_mu": BASE_DATA_DIR / "Pinball_shred_fixedsensors.pt",   
-        "shred_no_mu": BASE_DATA_DIR / "shred_model_weights.pth",       
+        "shred_mu": BASE_DATA_DIR / "shred_model_pinball_mu.pt",   
+        "shred_no_mu": BASE_DATA_DIR / "shred_model_no_mu.pt",       
     }
 else:
     SCRIPT_DIR = Path(__file__).resolve().parent
