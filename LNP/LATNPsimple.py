@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 # Added DeepONetDecoder to the imports
-from architectures import Decoder, DeepONetDecoder, Encoder, Latent, MLP, FourierFeatures, LearnableFourierFeatures
+from architectures import Decoder, DeepONetDecoder, SplitDecoder, Encoder, Latent, MLP, FourierFeatures, LearnableFourierFeatures
 
 import torch
 import torch.nn as nn
@@ -30,11 +30,18 @@ class LatNP_simple(nn.Module):
                  learnable_fourier: bool = False,
                  use_deeponet_decoder: bool = False,  # <--- Added toggle
                  p: int = 128,                        # <--- Added DeepONet projection dimension
-                 parameter_estimation: int = 0  # number of parameters to estimate
+                 parameter_estimation: int = 0,  # number of parameters to estimate
+                 output_groups: list = None      # <--- per-group decoder heads, e.g. [1, 2]
                  ):                       
         super().__init__()
         
         self.use_deeponet_decoder = use_deeponet_decoder
+        if output_groups is not None:
+            if use_deeponet_decoder:
+                raise ValueError("output_groups is not supported together with use_deeponet_decoder.")
+            if sum(output_groups) != y_dim:
+                raise ValueError(f"output_groups {output_groups} must sum to y_dim ({y_dim}).")
+        self.output_groups = output_groups
         
         # === Fourier Features for positional encoding ===
         self.use_fourier = fourier_vars is not None
@@ -95,6 +102,11 @@ class LatNP_simple(nn.Module):
                                            dropout=dropout,
                                            is_normalized=is_normalized,
                                            norm_type=norm_type)
+        elif self.output_groups is not None:
+            self.decoder = SplitDecoder(input_dim=z_dim + r_dim + fourier_dim,
+                                        output_groups=self.output_groups, hidden_dim=hidden_dim,
+                                        n_hidden=n_hidden + 1, activation=activation, dropout=dropout,
+                                        is_normalized=is_normalized, norm_type=norm_type)
         else:
             self.decoder = Decoder(input_dim=z_dim + r_dim + fourier_dim,
                                    output_dim=y_dim, hidden_dim=hidden_dim,
@@ -157,6 +169,13 @@ class LatNP_simple(nn.Module):
                 if final_layer is not None:
                     with torch.no_grad():
                         final_layer.weight *= 0.1
+
+        elif hasattr(self.decoder, 'heads'):
+            for head, group_size in zip(self.decoder.heads, self.decoder.output_groups):
+                with torch.no_grad():
+                    head.weight[group_size:, :] *= 0.1
+                    if head.bias is not None:
+                        head.bias[group_size:] = -2.0
 
         elif hasattr(self.decoder, 'decoder') and len(self.decoder.decoder) > 0:
             final_layer = None
@@ -241,7 +260,7 @@ class LatNP_simple(nn.Module):
         
         # Stochastic path
         z_context_mu, z_context_coef = self.latent(r_context_mean)
-        z_context_var = 0.0001 + torch.nn.functional.softplus(z_context_coef)
+        z_context_var = 1e-4 + torch.nn.functional.softplus(z_context_coef)
         
         std_context = torch.sqrt(z_context_var)
         epsilon_context = torch.randn(num_samples, batch_size, self.z_dim, device=x_context.device)
@@ -267,7 +286,7 @@ class LatNP_simple(nn.Module):
             r_target_mean = r_target.mean(dim=1)
             
             z_target_mu, z_target_coef = self.latent(r_target_mean)
-            z_target_var = 0.0001 + torch.nn.functional.softplus(z_target_coef)
+            z_target_var = 1e-4 + torch.nn.functional.softplus(z_target_coef)
             
             std_target = torch.sqrt(z_target_var)
             epsilon_target = torch.randn(num_samples, batch_size, self.z_dim, device=x_target.device)
@@ -286,7 +305,7 @@ class LatNP_simple(nn.Module):
                 y_pred_mu = y_pred_mu.reshape(num_samples, batch_size, num_target, self.y_dim)
                 y_pred_raw = y_pred_raw.reshape(num_samples, batch_size, num_target, self.y_dim)
             
-            y_pred_var = 1e-6 + nn.functional.softplus(y_pred_raw)
+            y_pred_var = 1e-4 + nn.functional.softplus(y_pred_raw)
             
             if num_samples == 1:
                 y_pred_mu = y_pred_mu.squeeze(0)
@@ -299,7 +318,7 @@ class LatNP_simple(nn.Module):
                 param_mu, param_raw_var = self.parameter_estimator(param_input_flat)
                 param_mu     = param_mu.reshape(num_samples, batch_size, -1)      # (S, B, param_dim)
                 param_raw_var = param_raw_var.reshape(num_samples, batch_size, -1)
-                param_var = 1e-6 + nn.functional.softplus(param_raw_var)
+                param_var = 1e-4 + nn.functional.softplus(param_raw_var)
                 if num_samples == 1:
                     param_mu  = param_mu.squeeze(0)   # (B, param_dim)
                     param_var = param_var.squeeze(0)
@@ -319,7 +338,7 @@ class LatNP_simple(nn.Module):
             y_pred_mu = y_pred_mu.reshape(num_samples, batch_size, num_target, self.y_dim)
             y_pred_raw = y_pred_raw.reshape(num_samples, batch_size, num_target, self.y_dim)
             
-        y_pred_var = 1e-6 + nn.functional.softplus(y_pred_raw)
+        y_pred_var = 1e-4 + nn.functional.softplus(y_pred_raw)
         
         if num_samples == 1:
             y_pred_mu = y_pred_mu.squeeze(0)
@@ -331,7 +350,7 @@ class LatNP_simple(nn.Module):
             param_mu, param_raw_var = self.parameter_estimator(param_input_flat)
             param_mu     = param_mu.reshape(num_samples, batch_size, -1)      # (S, B, param_dim)
             param_raw_var = param_raw_var.reshape(num_samples, batch_size, -1)
-            param_var = 1e-6 + nn.functional.softplus(param_raw_var)
+            param_var = 1e-4 + nn.functional.softplus(param_raw_var)
             if num_samples == 1:
                 param_mu  = param_mu.squeeze(0)   # (B, param_dim)
                 param_var = param_var.squeeze(0)

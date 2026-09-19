@@ -210,7 +210,7 @@ class DeepONetMeanVar(nn.Module):
         mean = torch.sum(branch_mean * trunk_mean, dim=-1) / math.sqrt(self.p) + self.mean_bias
         
         var_raw = torch.sum(branch_var * trunk_var, dim=-1) / math.sqrt(self.p) + self.var_bias
-        var = F.softplus(var_raw) + 1e-6
+        var = F.softplus(var_raw) + 1e-4
         
         return mean, var
 
