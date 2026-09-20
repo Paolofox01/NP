@@ -253,7 +253,7 @@ class LatNP(nn.Module):
         
         r_context_mean = r_context.mean(dim=1)
         z_context_mu, z_context_coef = self.latent(r_context_mean)
-        z_context_var = 1e-4 + torch.nn.functional.softplus(z_context_coef)
+        z_context_var = 1e-6 + torch.nn.functional.softplus(z_context_coef)
         
         std_context = torch.sqrt(z_context_var)
         epsilon_context = torch.randn(num_samples, batch_size, self.z_dim, device=x_context.device)
@@ -294,7 +294,7 @@ class LatNP(nn.Module):
             r_target_mean = r_target.mean(dim=1)
             
             z_target_mu, z_target_coef = self.latent(r_target_mean)
-            z_target_var = 1e-4 + torch.nn.functional.softplus(z_target_coef)
+            z_target_var = 1e-6 + torch.nn.functional.softplus(z_target_coef)
             
             std_target = torch.sqrt(z_target_var)
             epsilon_target = torch.randn(num_samples, batch_size, self.z_dim, device=x_target.device)
@@ -316,7 +316,7 @@ class LatNP(nn.Module):
                 y_pred_mu = y_pred_mu.reshape(num_samples, batch_size, num_target, self.y_dim)
                 y_pred_raw = y_pred_raw.reshape(num_samples, batch_size, num_target, self.y_dim)
             
-            y_pred_var = 1e-4 + nn.functional.softplus(y_pred_raw)
+            y_pred_var = 1e-6 + nn.functional.softplus(y_pred_raw)
             
             if num_samples == 1:
                 y_pred_mu = y_pred_mu.squeeze(0)
@@ -338,7 +338,7 @@ class LatNP(nn.Module):
             y_pred_mu = y_pred_mu.reshape(num_samples, batch_size, num_target, self.y_dim)
             y_pred_raw = y_pred_raw.reshape(num_samples, batch_size, num_target, self.y_dim)
             
-        y_pred_var = 1e-4 + nn.functional.softplus(y_pred_raw)
+        y_pred_var = 1e-6 + nn.functional.softplus(y_pred_raw)
         
         if num_samples == 1:
             y_pred_mu = y_pred_mu.squeeze(0)

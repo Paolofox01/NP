@@ -330,7 +330,7 @@ class LatNP_simple(nn.Module):
                 y_pred_mu = y_pred_mu.reshape(num_samples, batch_size, num_target, self.y_dim)
                 y_pred_raw = y_pred_raw.reshape(num_samples, batch_size, num_target, self.y_dim)
             
-            y_pred_var = 1e-4 + nn.functional.softplus(y_pred_raw)
+            y_pred_var = 1e-6 + nn.functional.softplus(y_pred_raw)
             
             if num_samples == 1:
                 y_pred_mu = y_pred_mu.squeeze(0)
@@ -363,7 +363,7 @@ class LatNP_simple(nn.Module):
             y_pred_mu = y_pred_mu.reshape(num_samples, batch_size, num_target, self.y_dim)
             y_pred_raw = y_pred_raw.reshape(num_samples, batch_size, num_target, self.y_dim)
             
-        y_pred_var = 1e-4 + nn.functional.softplus(y_pred_raw)
+        y_pred_var = 1e-6 + nn.functional.softplus(y_pred_raw)
         
         if num_samples == 1:
             y_pred_mu = y_pred_mu.squeeze(0)
@@ -375,7 +375,7 @@ class LatNP_simple(nn.Module):
             param_mu, param_raw_var = self.parameter_estimator(param_input_flat)
             param_mu     = param_mu.reshape(num_samples, batch_size, -1)      # (S, B, param_dim)
             param_raw_var = param_raw_var.reshape(num_samples, batch_size, -1)
-            param_var = 1e-4 + nn.functional.softplus(param_raw_var)
+            param_var = 1e-6 + nn.functional.softplus(param_raw_var)
             if num_samples == 1:
                 param_mu  = param_mu.squeeze(0)   # (B, param_dim)
                 param_var = param_var.squeeze(0)
