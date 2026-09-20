@@ -285,7 +285,7 @@ class LatNP_simple(nn.Module):
         
         # Stochastic path
         z_context_mu, z_context_coef = self.latent(r_context_mean)
-        z_context_var = 1e-4 + torch.nn.functional.softplus(z_context_coef)
+        z_context_var = 1e-6 + torch.nn.functional.softplus(z_context_coef)
         
         std_context = torch.sqrt(z_context_var)
         epsilon_context = torch.randn(num_samples, batch_size, self.z_dim, device=x_context.device)
@@ -311,7 +311,7 @@ class LatNP_simple(nn.Module):
             r_target_mean = r_target.mean(dim=1)
             
             z_target_mu, z_target_coef = self.latent(r_target_mean)
-            z_target_var = 1e-4 + torch.nn.functional.softplus(z_target_coef)
+            z_target_var = 1e-6 + torch.nn.functional.softplus(z_target_coef)
             
             std_target = torch.sqrt(z_target_var)
             epsilon_target = torch.randn(num_samples, batch_size, self.z_dim, device=x_target.device)
@@ -343,7 +343,7 @@ class LatNP_simple(nn.Module):
                 param_mu, param_raw_var = self.parameter_estimator(param_input_flat)
                 param_mu     = param_mu.reshape(num_samples, batch_size, -1)      # (S, B, param_dim)
                 param_raw_var = param_raw_var.reshape(num_samples, batch_size, -1)
-                param_var = 1e-4 + nn.functional.softplus(param_raw_var)
+                param_var = 1e-6 + nn.functional.softplus(param_raw_var)
                 if num_samples == 1:
                     param_mu  = param_mu.squeeze(0)   # (B, param_dim)
                     param_var = param_var.squeeze(0)
