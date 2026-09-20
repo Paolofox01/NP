@@ -11,95 +11,109 @@ __all__ = ["Decoder", "DeepONetDecoder", "SplitDecoder"]
 # ==============================================================================
 # 1. THE STANDARD MLP DECODER (Concatenation-based)
 # ==============================================================================
+from typing import Type
+import torch
+import torch.nn as nn
+
+
 class Decoder(nn.Module):
     """
-    Standard Decoder network for transforming concatenated latent representations 
-    and target coordinates back to the output space via a deep MLP.
+    Decoder network with a shared representation trunk and independent
+    heads for mean and variance / decoupled outputs.
     """
-    def __init__(self,
-                 input_dim: int,
-                 output_dim: int,
-                 hidden_dim: int = 64,
-                 n_hidden: int = 1,
-                 activation: Type[nn.Module] = nn.ReLU,
-                 dropout: float = 0.0,
-                 is_normalized: bool = True,
-                 norm_type: str = 'layer',
-                 norm_position: str = 'pre'):
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_dim: int = 64,
+        n_hidden: int = 1,
+        activation: Type[nn.Module] = nn.ReLU,
+        dropout: float = 0.0,
+        is_normalized: bool = True,
+        norm_type: str = "layer",
+        norm_position: str = "pre",
+        init_var_bias: float = -3.0,
+    ):
         super().__init__()
-        
+
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.hidden_dim = hidden_dim
         self.n_hidden = n_hidden
-        self.activation = activation
-        self.dropout = dropout
-        self.is_normalized = is_normalized
-        self.norm_type = norm_type
-        self.norm_position = norm_position
-        
-        layers = []
+
+        # 1. Shared Feature Trunk
+        trunk_layers = []
         curr_dim = input_dim
-        
-        for i in range(n_hidden):
-            # Pre-normalization
-            if is_normalized and norm_position == 'pre':
-                if norm_type == 'layer':
-                    layers.append(nn.LayerNorm(curr_dim))
-                elif norm_type == 'batch':
-                    layers.append(nn.BatchNorm1d(curr_dim))
+
+        for _ in range(n_hidden):
+            if is_normalized and norm_position == "pre":
+                if norm_type == "layer":
+                    trunk_layers.append(nn.LayerNorm(curr_dim))
+                elif norm_type == "batch":
+                    trunk_layers.append(nn.BatchNorm1d(curr_dim))
                 else:
                     raise ValueError(f"norm_type must be 'layer' or 'batch', got '{norm_type}'")
-            
-            layers.append(nn.Linear(curr_dim, hidden_dim))
-            layers.append(activation())
-            
-            # Post-normalization
-            if is_normalized and norm_position == 'post':
-                if norm_type == 'layer':
-                    layers.append(nn.LayerNorm(hidden_dim))
-                elif norm_type == 'batch':
-                    layers.append(nn.BatchNorm1d(hidden_dim))
+
+            trunk_layers.append(nn.Linear(curr_dim, hidden_dim))
+            trunk_layers.append(activation())
+
+            if is_normalized and norm_position == "post":
+                if norm_type == "layer":
+                    trunk_layers.append(nn.LayerNorm(hidden_dim))
+                elif norm_type == "batch":
+                    trunk_layers.append(nn.BatchNorm1d(hidden_dim))
                 else:
                     raise ValueError(f"norm_type must be 'layer' or 'batch', got '{norm_type}'")
-            
+
             if dropout > 0:
-                layers.append(nn.Dropout(dropout))
-                    
+                trunk_layers.append(nn.Dropout(dropout))
+
             curr_dim = hidden_dim
-        
-        # Output Layer (Outputs raw logits for mean and variance)
-        layers.append(nn.Linear(curr_dim, 2 * output_dim))
-        
-        self.decoder = nn.Sequential(*layers)
-        
-    def forward(self, x: torch.Tensor) -> tuple:
-        y_params = self.decoder(x)
-        output1, output2 = torch.chunk(y_params, 2, dim=-1)
+
+        self.trunk = nn.Sequential(*trunk_layers)
+
+        # 2. Independent Output Heads
+        self.head1 = nn.Linear(curr_dim, output_dim)  # Mean / Output 1
+        self.head2 = nn.Linear(curr_dim, output_dim)  # Var / Output 2
+
+        # Initialize variance/head2 bias to keep initial variance small and stable
+        if init_var_bias is not None:
+            nn.init.constant_(self.head2.bias, init_var_bias)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        features = self.trunk(x)
+        output1 = self.head1(features)
+        output2 = self.head2(features)
         return output1, output2
 
 
 # ==============================================================================
 # 1b. SPLIT-HEAD MLP DECODER (shared trunk, per-group final projection)
 # ==============================================================================
-class SplitDecoder(nn.Module):
-    """Same shared trunk as Decoder, but the final projection is split into
-    independent heads per output group (e.g. one head for a scalar field,
-    another for a vector field), instead of one Linear layer over all channels.
+from typing import Type
+import torch
+import torch.nn as nn
 
-    Output channels are concatenated in the order of `output_groups`, so the
-    caller must ensure that order matches the target tensor's channel order.
+
+class SplitDecoder(nn.Module):
     """
-    def __init__(self,
-                 input_dim: int,
-                 output_groups: list,
-                 hidden_dim: int = 64,
-                 n_hidden: int = 1,
-                 activation: Type[nn.Module] = nn.ReLU,
-                 dropout: float = 0.0,
-                 is_normalized: bool = True,
-                 norm_type: str = 'layer',
-                 norm_position: str = 'pre'):
+    Shared trunk with independent output heads per group and per statistic (mean vs. variance).
+    Decouples physical field groups (e.g., scalar height vs. vector velocities) while also
+    isolating predictive mean projections from uncertainty projections.
+    """
+    def __init__(
+        self,
+        input_dim: int,
+        output_groups: list[int],
+        hidden_dim: int = 64,
+        n_hidden: int = 1,
+        activation: Type[nn.Module] = nn.ReLU,
+        dropout: float = 0.0,
+        is_normalized: bool = True,
+        norm_type: str = "layer",
+        norm_position: str = "pre",
+        init_var_bias: float = -2.0,
+    ):
         super().__init__()
 
         self.input_dim = input_dim
@@ -110,11 +124,13 @@ class SplitDecoder(nn.Module):
 
         layers = []
         curr_dim = input_dim
+
         for _ in range(n_hidden):
-            if is_normalized and norm_position == 'pre':
-                if norm_type == 'layer':
+            # Pre-normalization
+            if is_normalized and norm_position == "pre":
+                if norm_type == "layer":
                     layers.append(nn.LayerNorm(curr_dim))
-                elif norm_type == 'batch':
+                elif norm_type == "batch":
                     layers.append(nn.BatchNorm1d(curr_dim))
                 else:
                     raise ValueError(f"norm_type must be 'layer' or 'batch', got '{norm_type}'")
@@ -122,10 +138,11 @@ class SplitDecoder(nn.Module):
             layers.append(nn.Linear(curr_dim, hidden_dim))
             layers.append(activation())
 
-            if is_normalized and norm_position == 'post':
-                if norm_type == 'layer':
+            # Post-normalization
+            if is_normalized and norm_position == "post":
+                if norm_type == "layer":
                     layers.append(nn.LayerNorm(hidden_dim))
-                elif norm_type == 'batch':
+                elif norm_type == "batch":
                     layers.append(nn.BatchNorm1d(hidden_dim))
                 else:
                     raise ValueError(f"norm_type must be 'layer' or 'batch', got '{norm_type}'")
@@ -136,16 +153,27 @@ class SplitDecoder(nn.Module):
             curr_dim = hidden_dim
 
         self.trunk = nn.Sequential(*layers)
-        self.heads = nn.ModuleList([nn.Linear(curr_dim, 2 * group_size) for group_size in self.output_groups])
 
-    def forward(self, x: torch.Tensor) -> tuple:
+        # Independent heads for each physical group and statistic
+        self.mean_heads = nn.ModuleList([
+            nn.Linear(curr_dim, g) for g in self.output_groups
+        ])
+        self.var_heads = nn.ModuleList([
+            nn.Linear(curr_dim, g) for g in self.output_groups
+        ])
+
+        # Initialize variance biases to start uncertainty small and stable
+        if init_var_bias is not None:
+            for head in self.var_heads:
+                nn.init.constant_(head.bias, init_var_bias)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         features = self.trunk(x)
-        means, raws = [], []
-        for head in self.heads:
-            mean, raw = torch.chunk(head(features), 2, dim=-1)
-            means.append(mean)
-            raws.append(raw)
-        return torch.cat(means, dim=-1), torch.cat(raws, dim=-1)
+
+        means = [head(features) for head in self.mean_heads]
+        vars_raw = [head(features) for head in self.var_heads]
+
+        return torch.cat(means, dim=-1), torch.cat(vars_raw, dim=-1)
 
 
 # ==============================================================================

@@ -140,83 +140,107 @@ class LatNP_simple(nn.Module):
     def _initialize_weights(self):
         """
         Initialize network weights for stable Neural Process training.
-        Supports both Standard MLP Decoders and DeepONet Decoders.
+        Supports standard MLP Decoders, SplitDecoders, DeepONet Decoders,
+        the optional parameter estimator, and latent space N(0, I) alignment.
         """
+        # ----------------------------------------------------------------------
+        # 1. Base initialization across all linear layers & normalization
+        # ----------------------------------------------------------------------
         for name, module in self.named_modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight, gain=1.0)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
-            
-            elif isinstance(module, nn.LayerNorm):
-                if module.elementwise_affine:
+
+            elif isinstance(module, (nn.LayerNorm, nn.BatchNorm1d)):
+                if getattr(module, "elementwise_affine", True):
                     nn.init.ones_(module.weight)
                     nn.init.zeros_(module.bias)
-            
-            elif isinstance(module, nn.BatchNorm1d):
-                nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
-        
-        # Decoder Initialization
-        if hasattr(self.decoder, 'branch_var_head'):
+
+        # ----------------------------------------------------------------------
+        # 2. Output Decoder Initialization (Low initial observation variance)
+        # ----------------------------------------------------------------------
+        # Case A: DeepONet Decoder
+        if hasattr(self.decoder, "branch_var_head"):
             for head in [self.decoder.branch_var_head, self.decoder.trunk_var_head]:
-                final_layer = None
                 for layer in reversed(list(head.modules())):
                     if isinstance(layer, nn.Linear):
-                        final_layer = layer
+                        with torch.no_grad():
+                            layer.weight.mul_(0.1)
                         break
-                
-                if final_layer is not None:
-                    with torch.no_grad():
-                        final_layer.weight *= 0.1
+            if hasattr(self.decoder, "var_bias") and isinstance(self.decoder.var_bias, nn.Parameter):
+                with torch.no_grad():
+                    self.decoder.var_bias.fill_(-3.0)
 
-        elif hasattr(self.decoder, 'heads'):
+        # Case B: Decoupled Decoder (self.head1 = mean, self.head2 = var)
+        elif hasattr(self.decoder, "head2"):
+            with torch.no_grad():
+                self.decoder.head2.weight.mul_(0.1)
+                if self.decoder.head2.bias is not None:
+                    self.decoder.head2.bias.fill_(-2.0)
+
+        # Case C: Decoupled SplitDecoder (self.mean_heads, self.var_heads)
+        elif hasattr(self.decoder, "var_heads"):
+            for head in self.decoder.var_heads:
+                with torch.no_grad():
+                    head.weight.mul_(0.1)
+                    if head.bias is not None:
+                        head.bias.fill_(-2.0)
+
+        # Case D: Legacy SplitDecoder with chunked heads
+        elif hasattr(self.decoder, "heads") and hasattr(self.decoder, "output_groups"):
             for head, group_size in zip(self.decoder.heads, self.decoder.output_groups):
                 with torch.no_grad():
-                    head.weight[group_size:, :] *= 0.1
+                    head.weight[group_size:, :].mul_(0.1)
                     if head.bias is not None:
-                        head.bias[group_size:] = -2.0
+                        head.bias[group_size:].fill_(-2.0)
 
-        elif hasattr(self.decoder, 'decoder') and len(self.decoder.decoder) > 0:
-            final_layer = None
+        # Case E: Legacy Chunked MLP Decoder (single linear layer: 2 * output_dim)
+        elif hasattr(self.decoder, "decoder"):
             for layer in reversed(list(self.decoder.decoder.modules())):
                 if isinstance(layer, nn.Linear):
-                    final_layer = layer
+                    out_dim = layer.out_features // 2
+                    with torch.no_grad():
+                        layer.weight[out_dim:, :].mul_(0.1)
+                        if layer.bias is not None:
+                            layer.bias[out_dim:].fill_(-2.0)
                     break
-            
-            if final_layer is not None:
-                output_dim = final_layer.out_features // 2
+
+        # ----------------------------------------------------------------------
+        # 3. Latent Encoder Alignment with N(0, I) Prior
+        # ----------------------------------------------------------------------
+        latent_module = getattr(self.latent, "latent", self.latent)
+        for layer in reversed(list(latent_module.modules())):
+            if isinstance(layer, nn.Linear):
+                z_dim = layer.out_features // 2
                 with torch.no_grad():
-                    final_layer.weight[output_dim:, :] *= 0.1
-                    if final_layer.bias is not None:
-                        final_layer.bias[output_dim:] = -2.0
-        
-        if hasattr(self.latent, 'latent') and len(self.latent.latent) > 0:
-            latent_final_layer = None
-            for layer in reversed(list(self.latent.latent.modules())):
-                if isinstance(layer, nn.Linear):
-                    latent_final_layer = layer
-                    break
-            
-            if latent_final_layer is not None:
-                z_dim = latent_final_layer.out_features // 2
-                with torch.no_grad():
-                    latent_final_layer.weight[z_dim:, :] *= 0.1
-                    if latent_final_layer.bias is not None:
-                        latent_final_layer.bias[z_dim:] = -2.0
-        
+                    # Scale weights down so initial latents don't scatter
+                    layer.weight[z_dim:, :].mul_(0.1)
+                    if layer.bias is not None:
+                        # 0.0 aligns with standard normal N(0, I) prior for log(sigma)
+                        layer.bias[z_dim:].fill_(0.0)
+                break
+
+        # ----------------------------------------------------------------------
+        # 4. Parameter Estimator Initialization (if enabled)
+        # ----------------------------------------------------------------------
         if self.parameter_estimator is not None:
-            final_layer = None
-            for layer in reversed(list(self.parameter_estimator.decoder.modules())):
-                if isinstance(layer, nn.Linear):
-                    final_layer = layer
-                    break
-            if final_layer is not None:
-                out = final_layer.out_features // 2
+            # Check for decoupled head2 first
+            if hasattr(self.parameter_estimator, "head2"):
                 with torch.no_grad():
-                    final_layer.weight[out:, :] *= 0.1
-                    if final_layer.bias is not None:
-                        final_layer.bias[out:] = -2.0
+                    self.parameter_estimator.head2.weight.mul_(0.1)
+                    if self.parameter_estimator.head2.bias is not None:
+                        self.parameter_estimator.head2.bias.fill_(-2.0)
+            # Fallback for legacy chunked decoder
+            elif hasattr(self.parameter_estimator, "decoder"):
+                for layer in reversed(list(self.parameter_estimator.decoder.modules())):
+                    if isinstance(layer, nn.Linear):
+                        out_dim = layer.out_features // 2
+                        with torch.no_grad():
+                            layer.weight[out_dim:, :].mul_(0.1)
+                            if layer.bias is not None:
+                                layer.bias[out_dim:].fill_(-2.0)
+                        break
         
     def forward(self, x_context: torch.Tensor, y_context: torch.Tensor, 
                 x_target: torch.Tensor, y_target: torch.Tensor = None,
@@ -244,6 +268,7 @@ class LatNP_simple(nn.Module):
                 x_target_encoded = torch.cat([x_target_raw_prefix, x_target_fourier], dim=-1)
         else:
             x_context_encoded = x_context
+            x_target_encoded = x_target
             x_target_encoded = x_target
         
         # === STEP 1: Encode context (x,y) pairs ===
