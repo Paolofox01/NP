@@ -70,6 +70,8 @@ class LatNP_simple(nn.Module):
         self.fourier_y = None
         fourier_y_dim = y_dim
         
+        self.floor_var = floor_var
+        
         # === IMPROVED: Direct encoding of (x,y) pairs ===
         self.context_encoder = MLP(input_dim=fourier_dim + fourier_y_dim, output_dim=r_dim,
                                    hidden_dim=hidden_dim, n_hidden=n_hidden,
