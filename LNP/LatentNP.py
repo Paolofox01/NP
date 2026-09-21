@@ -32,7 +32,8 @@ class LatNP(nn.Module):
                  learnable_fourier: bool = False,
                  use_deeponet_decoder: bool = False,  # <--- ADDED TOGGLE
                  p: int = 128,                       # <--- ADDED DEEPONET PROJECTION DIM
-                 output_groups: list = None):        # <--- per-group decoder heads, e.g. [1, 2]
+                 output_groups: list = None,           # <--- per-group decoder heads, e.g. [1, 2]
+                 floor_var: float = 1e-6):       
         super().__init__()
         
         self.use_deeponet_decoder = use_deeponet_decoder
@@ -69,6 +70,8 @@ class LatNP(nn.Module):
 
         self.fourier_y = None
         fourier_y_dim = y_dim
+        
+        self.floor_var = floor_var
         
         # === Encoders and Attention ===
         self.context_encoder = MLP(input_dim=fourier_dim + fourier_y_dim, output_dim=r_dim,
@@ -316,7 +319,7 @@ class LatNP(nn.Module):
                 y_pred_mu = y_pred_mu.reshape(num_samples, batch_size, num_target, self.y_dim)
                 y_pred_raw = y_pred_raw.reshape(num_samples, batch_size, num_target, self.y_dim)
             
-            y_pred_var = 1e-6 + nn.functional.softplus(y_pred_raw)
+            y_pred_var = self.floor_var + nn.functional.softplus(y_pred_raw)
             
             if num_samples == 1:
                 y_pred_mu = y_pred_mu.squeeze(0)
@@ -338,7 +341,7 @@ class LatNP(nn.Module):
             y_pred_mu = y_pred_mu.reshape(num_samples, batch_size, num_target, self.y_dim)
             y_pred_raw = y_pred_raw.reshape(num_samples, batch_size, num_target, self.y_dim)
             
-        y_pred_var = 1e-6 + nn.functional.softplus(y_pred_raw)
+        y_pred_var = self.floor_var + nn.functional.softplus(y_pred_raw)
         
         if num_samples == 1:
             y_pred_mu = y_pred_mu.squeeze(0)

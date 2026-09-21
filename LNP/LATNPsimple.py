@@ -31,8 +31,8 @@ class LatNP_simple(nn.Module):
                  use_deeponet_decoder: bool = False,  # <--- Added toggle
                  p: int = 128,                        # <--- Added DeepONet projection dimension
                  parameter_estimation: int = 0,  # number of parameters to estimate
-                 output_groups: list = None      # <--- per-group decoder heads, e.g. [1, 2]
-                 ):                       
+                 output_groups: list = None,      # <--- per-group decoder heads, e.g. [1, 2]
+                 floor_var: float = 1e-6):                       
         super().__init__()
         
         self.use_deeponet_decoder = use_deeponet_decoder
@@ -330,7 +330,7 @@ class LatNP_simple(nn.Module):
                 y_pred_mu = y_pred_mu.reshape(num_samples, batch_size, num_target, self.y_dim)
                 y_pred_raw = y_pred_raw.reshape(num_samples, batch_size, num_target, self.y_dim)
             
-            y_pred_var = 1e-6 + nn.functional.softplus(y_pred_raw)
+            y_pred_var = self.floor_var + nn.functional.softplus(y_pred_raw)
             
             if num_samples == 1:
                 y_pred_mu = y_pred_mu.squeeze(0)
@@ -343,7 +343,7 @@ class LatNP_simple(nn.Module):
                 param_mu, param_raw_var = self.parameter_estimator(param_input_flat)
                 param_mu     = param_mu.reshape(num_samples, batch_size, -1)      # (S, B, param_dim)
                 param_raw_var = param_raw_var.reshape(num_samples, batch_size, -1)
-                param_var = 1e-6 + nn.functional.softplus(param_raw_var)
+                param_var = self.floor_var + nn.functional.softplus(param_raw_var)
                 if num_samples == 1:
                     param_mu  = param_mu.squeeze(0)   # (B, param_dim)
                     param_var = param_var.squeeze(0)
@@ -363,7 +363,7 @@ class LatNP_simple(nn.Module):
             y_pred_mu = y_pred_mu.reshape(num_samples, batch_size, num_target, self.y_dim)
             y_pred_raw = y_pred_raw.reshape(num_samples, batch_size, num_target, self.y_dim)
             
-        y_pred_var = 1e-6 + nn.functional.softplus(y_pred_raw)
+        y_pred_var = self.floor_var + nn.functional.softplus(y_pred_raw)
         
         if num_samples == 1:
             y_pred_mu = y_pred_mu.squeeze(0)
@@ -375,7 +375,7 @@ class LatNP_simple(nn.Module):
             param_mu, param_raw_var = self.parameter_estimator(param_input_flat)
             param_mu     = param_mu.reshape(num_samples, batch_size, -1)      # (S, B, param_dim)
             param_raw_var = param_raw_var.reshape(num_samples, batch_size, -1)
-            param_var = 1e-6 + nn.functional.softplus(param_raw_var)
+            param_var = self.floor_var + nn.functional.softplus(param_raw_var)
             if num_samples == 1:
                 param_mu  = param_mu.squeeze(0)   # (B, param_dim)
                 param_var = param_var.squeeze(0)

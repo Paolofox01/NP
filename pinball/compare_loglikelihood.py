@@ -432,7 +432,7 @@ class DeepONetMeanVar(nn.Module):
 
         mean = torch.sum(branch_mean * trunk_mean, dim=-1) / math.sqrt(self.p) + self.mean_bias
         var_raw = torch.sum(branch_var * trunk_var, dim=-1) / math.sqrt(self.p) + self.var_bias
-        var = F.softplus(var_raw) + 1e-6
+        var = F.softplus(var_raw) + 1e-4
         return mean, var
 
 
@@ -933,7 +933,7 @@ def main(USE_MU):
         x_dim=x_dim, y_dim=y_dim, r_dim=r_dim, z_dim=z_dim, hidden_dim=hidden_dim, n_hidden=n_hidden,
         activation=nn.ReLU, dropout=0.0, is_normalized=True, norm_type='layer',
         fourier_vars=3, num_frequencies=32, num_heads=4, fourier_scale=1.0, learnable_fourier=True,
-        use_skip=True, use_deeponet_decoder=False,
+        use_skip=True, use_deeponet_decoder=False, floor_var=1e-4,
     ).to(device)
     model_anp = load_model_checkpoint(model_anp, CHECKPOINT_PATHS[anp_key], device)
     model_anp.eval()
@@ -991,7 +991,7 @@ def main(USE_MU):
         x_dim=x_dim, y_dim=y_dim, r_dim=r_dim, z_dim=z_dim, hidden_dim=hidden_dim, n_hidden=n_hidden,
         activation=nn.ReLU, dropout=0.0, is_normalized=True, norm_type='layer',
         fourier_vars=3, num_frequencies=32, fourier_scale=1.0, learnable_fourier=True,
-        use_deeponet_decoder=False, p=128,
+        use_deeponet_decoder=False, p=128, floor_var=1e-4,
     ).to(device)
     model_lnp = load_model_checkpoint(model_lnp, CHECKPOINT_PATHS[lnp_key], device)
     model_lnp.eval()
