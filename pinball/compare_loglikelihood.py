@@ -931,7 +931,7 @@ def main(USE_MU):
     print("\nInitializing ANP...")
     model_anp = LatNP(
         x_dim=x_dim, y_dim=y_dim, r_dim=r_dim, z_dim=z_dim, hidden_dim=hidden_dim, n_hidden=n_hidden,
-        activation=nn.ReLU, dropout=0.0, is_normalized=True, norm_type='layer',
+        activation=nn.ReLU, dropout=0.05, is_normalized=True, norm_type='layer',
         fourier_vars=3, num_frequencies=32, num_heads=4, fourier_scale=1.0, learnable_fourier=True,
         use_skip=True, use_deeponet_decoder=False, floor_var=1e-4,
     ).to(device)
