@@ -6,8 +6,6 @@ import math
 from pathlib import Path
 from functools import partial
 
-from sklearn.utils.extmath import randomized_svd
-from LNP.models import SHRED
 
 import numpy as np
 import torch
@@ -26,6 +24,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # Domain & Model modules
+
+from sklearn.utils.extmath import randomized_svd
+from LNP.models import SHRED
 from processdata import trajectory, trajectories, multiplot
 from LNP.LatentNP import LatNP
 from LNP.LATNPsimple import LatNP_simple
