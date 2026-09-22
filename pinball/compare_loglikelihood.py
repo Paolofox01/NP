@@ -35,6 +35,11 @@ from LNP.loss_np import ELBOLossNP
 from LNP.training import train_np
 import gpytorch
 
+np.random.seed(42)
+torch.manual_seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(42)
+
 # ============================================================
 # 0. KAGGLE & LOCAL PATH CONFIGURATION
 # ============================================================
