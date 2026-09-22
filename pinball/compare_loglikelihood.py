@@ -44,7 +44,7 @@ if IS_KAGGLE:
     BASE_DATA_DIR = Path("/kaggle/input/datasets/filippovolpicelli/pinball-data")
     KAGGLE_NB1 = Path("/kaggle/input/notebooks/filippovolpicelli/pinball-nb/NP/pinball")
     KAGGLE_NB2 = Path("/kaggle/input/notebooks/filippovolpicelli/notebookae593e1af4/NP/pinball")
-    
+    KAGGLE_NB3 = Path("/kaggle/input/notebooks/nomecognome02873/pinball-lnp/NP/pinball")
     OUTPUT_LOGS_DIR = Path("/kaggle/working/logs_compare")
     
     CHECKPOINT_PATHS = {
@@ -56,8 +56,8 @@ if IS_KAGGLE:
         # Model Checkpoints
         "anp_mu": KAGGLE_NB2 / "checkpoints_pinball_no_dndec_mu_new_5sens/phase2/best_model.pt",
         "anp_no_mu": KAGGLE_NB2 / "checkpoints_pinball_no_dndec_no_mu_new_5sens/phase2/best_model.pt",
-        "lnp_mu": KAGGLE_NB1 / "checkpoints_pinball_no_dndec_mu_3/phase2/best_model.pt",
-        "lnp_no_mu": KAGGLE_NB1 / "checkpoints_pinball_no_dndec_no_mu_3/phase2/best_model.pt",
+        "lnp_mu": KAGGLE_NB3 / "checkpoints_pinball_no_dndec_mu_3/phase2/best_model.pt",
+        "lnp_no_mu": KAGGLE_NB3 / "checkpoints_pinball_no_dndec_no_mu_3/phase2/best_model.pt",
         
         "probdeeponet_mu": KAGGLE_NB1 / "checkpoints_pinball_fc_baseline_with_mu/best_model.pt",
         "probdeeponet_no_mu": KAGGLE_NB1 / "checkpoints_pinball_fc_baseline_without_mu/best_model.pt",
