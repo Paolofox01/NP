@@ -755,7 +755,10 @@ def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_colla
             plt.savefig(logs_dir / f"multiplot_grid_{grid_suffix}_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
             plt.close(fig)
 
-def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, device, time_idx, lag, sensors_to_use, drop_options, mc_samples=100, is_mc=True, model_format="np", likelihood=None, y_mean=None, y_std=None, use_mu=False):
+def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm,
+                      device, time_idx, lag, sensors_to_use, drop_options, mc_samples=100,
+                      is_mc=True, model_format="np", likelihood=None, y_mean=None, y_std=None,
+                      use_mu=False, noise_std=0.0):
     all_ll, all_se, all_sse, all_mse = [], [], [], []
     collate_use_mu = True if model_format == "gp" else use_mu
 
@@ -768,7 +771,11 @@ def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coord
         )
 
         x_c, x_t, y_t = x_c.to(device), x_t.to(device), y_t.to(device)
-        if y_c is not None: y_c = y_c.to(device)
+        if y_c is not None: 
+            y_c = y_c.to(device)
+            if noise_std > 0.0:
+                y_c = y_c + noise_std * torch.randn_like(y_c)
+            
 
         with torch.no_grad():
             if model_format == "gp":
@@ -1038,6 +1045,58 @@ def main(USE_MU):
     plot_all_distributions(ll_dict_B_lnp, se_dict_B_lnp, sse_dict_B_lnp, mse_dict_B_lnp, out_path=logs_dir / "diagnostics_lnp_lag9_drop_sensors.png")
 
     # ==============================================================================
+    # 6D. NOISE RESISTANCE ANALYSIS (ANP vs LNP)
+    # ==============================================================================
+    print("\n" + "="*60)
+    print("RUNNING NOISE RESISTANCE ANALYSIS (ANP vs LNP, Lag 19)")
+    print("="*60)
+
+    # Fractions of data standard deviation to inject: 0%, 5%, 10%, 20%, 50%
+    noise_fractions = [0.0, 0.05, 0.10, 0.20, 0.50]
+    noise_colors = ["#264653", "#2A9D8F", "#E9C46A", "#F4A261", "#E76F51"]
+    fixed_lag = 19
+
+    # --- ANP Noise Sweep ---
+    ll_noise_anp, se_noise_anp, sse_noise_anp, mse_noise_anp = {}, {}, {}, {}
+    for frac, color in zip(noise_fractions, noise_colors):
+        sigma = frac * y_std
+        label = f"ANP (Noise {int(frac * 100)}%)"
+        METHOD_STYLES[label] = {"color": color, "linestyle": "-", "linewidth": 2.2, "alpha": 0.85}
+        
+        ll, se, sse, mse = evaluate_scenario(
+            model=model_anp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
+            mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=fixed_lag,
+            sensors_to_use=fixed_sens, drop_options=[0], mc_samples=100, is_mc=True,
+            model_format="np", use_mu=USE_MU, noise_std=sigma
+        )
+        ll_noise_anp[label], se_noise_anp[label], sse_noise_anp[label], mse_noise_anp[label] = ll, se, sse, mse
+
+    plot_all_distributions(
+        ll_noise_anp, se_noise_anp, sse_noise_anp, mse_noise_anp,
+        out_path=logs_dir / "diagnostics_anp_noise_resistance.png"
+    )
+
+    # --- LNP Noise Sweep ---
+    ll_noise_lnp, se_noise_lnp, sse_noise_lnp, mse_noise_lnp = {}, {}, {}, {}
+    for frac, color in zip(noise_fractions, noise_colors):
+        sigma = frac * y_std
+        label = f"LNP (Noise {int(frac * 100)}%)"
+        METHOD_STYLES[label] = {"color": color, "linestyle": "-", "linewidth": 2.2, "alpha": 0.85}
+        
+        ll, se, sse, mse = evaluate_scenario(
+            model=model_lnp, dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
+            mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=fixed_lag,
+            sensors_to_use=fixed_sens, drop_options=[0], mc_samples=100, is_mc=True,
+            model_format="np", use_mu=USE_MU, noise_std=sigma
+        )
+        ll_noise_lnp[label], se_noise_lnp[label], sse_noise_lnp[label], mse_noise_lnp[label] = ll, se, sse, mse
+
+    plot_all_distributions(
+        ll_noise_lnp, se_noise_lnp, sse_noise_lnp, mse_noise_lnp,
+        out_path=logs_dir / "diagnostics_lnp_noise_resistance.png"
+    )
+
+    # ==============================================================================
     # 7. PROB-DEEPONET
     # ==============================================================================
     print("\nInitializing Prob-DeepONet...")
@@ -1181,6 +1240,8 @@ def main(USE_MU):
         print("[!] Could not import SHRED from utils.models. Skipping SHRED.")
         model_shred = None
 
+    
+    
     # ==============================================================================
     # 11. CONFRONTO DIRETTO DEI MODELLI (All Sensors, Lag 19)
     # ==============================================================================
