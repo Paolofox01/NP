@@ -652,7 +652,7 @@ def run_experiment(USE_MU, USE_BT_TIME=False, ESTIMATE_PARAMS=False, USE_DEEPONE
             hidden_dim=hidden_dim,
             n_hidden=n_hidden,
             activation=nn.ReLU,
-            dropout=0.0,
+            dropout=0.05,
             is_normalized=True,
             norm_type='layer',
             fourier_vars=3,
