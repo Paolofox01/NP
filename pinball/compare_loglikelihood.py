@@ -40,6 +40,15 @@ torch.manual_seed(42)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
 
+plt.rcParams.update({
+    'axes.titlesize': 13,      # Title above each subplot
+    'figure.titlesize': 12,    # Main figure suptitle
+    'axes.labelsize': 10,      # X and Y axis names
+    'xtick.labelsize': 9,     # Numbers on X axis
+    'ytick.labelsize': 9,     # Numbers on Y axis
+    'legend.fontsize': 9,     # Legend font size
+})
+
 # ============================================================
 # 0. KAGGLE & LOCAL PATH CONFIGURATION
 # ============================================================
@@ -279,8 +288,8 @@ def plot_with_colorbar(y, Yh, ax=None, cmap="jet", vmin=None, vmax=None, label=N
     mappable = plot(vec2fun(y, Yh), cmap=cmap, vmin=vmin, vmax=vmax)
     if cbar_kwargs is None: cbar_kwargs = {"shrink": 0.75, "pad": 0.02}
     cbar = plt.colorbar(mappable, ax=ax, **cbar_kwargs)
-    cbar.ax.tick_params(labelsize=14)
-    cbar.set_label(label, size=16)
+    cbar.ax.tick_params(labelsize=8.5)
+    cbar.set_label(label, size = 9.5)
     return mappable
 
 # ==============================================================================
@@ -468,20 +477,22 @@ def compute_standardized_se(y_pred_mean, y_pred_var, y_true):
 
 def diagnostic_color_limits(targets):
     state_min, state_max = targets.amin().item(), targets.amax().item()
-    state_span = max(state_max - state_min, 1e-8)
     reference_std = max(targets.std().item(), 1e-8)
-    max_standardized_error = 10.0
     reference_variance = reference_std ** 2
+    max_standardized_error = 10.0
+    
     max_log_likelihood = -0.5 * math.log(2.0 * math.pi * reference_variance)
     min_log_likelihood = max_log_likelihood - 0.5 * max_standardized_error
+
     return {
         "state": (state_min, state_max),
-        "squared_error": (0.0, state_span ** 2),
-        "standard_deviation": (0.0, state_span),
+        # Scale to meaningful error ranges (e.g., 2 to 3 standard deviations)
+        "squared_error": (0.0, (2.0 * reference_std) ** 2),
+        "standard_deviation": (0.0, 1.5 * reference_std),
         "log_likelihood": (min_log_likelihood, max_log_likelihood),
         "standardized_error": (0.0, max_standardized_error),
     }
-
+    
 plt.style.use('default')
 
 METHOD_STYLES = {
@@ -511,11 +522,11 @@ def _plot_row(ax_hist, ax_box, data_dict, title, xlabel, bins, clip_pct, log_sca
         legend_handles.append(mpatches.Patch(color=style["color"], label=name))
 
     ax_hist.set_xlim(x_lo, x_hi)
-    ax_hist.set_xlabel(xlabel, fontsize=12)
-    ax_hist.set_ylabel("Density", fontsize=12)
-    ax_hist.set_title(title, fontsize=15)
-    ax_hist.tick_params(axis='both', labelsize=12)
-    ax_hist.legend(handles=legend_handles, framealpha=0.85, fontsize=12)
+    ax_hist.set_xlabel(xlabel)
+    ax_hist.set_ylabel("Density")
+    ax_hist.set_title(title)
+    ax_hist.tick_params(axis='both')
+    ax_hist.legend(handles=legend_handles, framealpha=0.85)
 
     bp_data, bp_names = list(data_dict.values()), list(data_dict.keys())
     flier_style = dict(marker='o', markerfacecolor='black', markersize=2, alpha=0.1, linestyle='none', markeredgecolor='none')
@@ -525,10 +536,10 @@ def _plot_row(ax_hist, ax_box, data_dict, title, xlabel, bins, clip_pct, log_sca
         patch.set_facecolor(colour); patch.set_alpha(0.70)
 
     ax_box.set_xticks(range(1, len(bp_names) + 1))
-    ax_box.set_xticklabels(bp_names, rotation=0, fontsize=10)
-    ax_box.set_ylabel(xlabel, fontsize=12)
-    ax_box.set_title(f"Box Plot: {title}", fontsize=15)
-    ax_box.tick_params(axis='both', labelsize=12)
+    ax_box.set_xticklabels(bp_names, rotation=0)
+    ax_box.set_ylabel(xlabel)
+    ax_box.set_title(f"Box Plot: {title}")
+    ax_box.tick_params(axis='both')
 
     if log_scale in [True, 'log']: ax_box.set_yscale('log')
     elif log_scale == 'symlog': ax_box.set_yscale('symlog')
@@ -628,11 +639,11 @@ def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, 
             sample_log_lik = log_lik_all[batch_idx]
             sample_sse = sample_sq_error / sample_total_var.clamp_min(1e-8)
 
-            def _local_plot(val_array, cmap, vmin, vmax, title, ax):
+            def _local_plot(val_array, cmap, vmin, vmax, title, ax, title_size=12):
                 plt.sca(ax)
                 plot_with_colorbar(val_array, Yh, cmap=cmap, vmin=vmin, vmax=vmax, label=title)
                 plt.scatter(context[:, 0], context[:, 1], color='red', s=20)
-                ax.set_title(title, fontsize=22)
+                ax.set_title(title, fontsize=title_size)
                 ax.axis('off')
 
             # 2x3 Diagnostic Grid
@@ -650,10 +661,10 @@ def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, 
 
             # 2x5 Monte Carlo Samples Grid
             fig_mc, axes_mc = plt.subplots(2, 5, figsize=(11, 4))
-            fig_mc.suptitle(f"10 Monte Carlo Samples | Sample {test_indices[batch_idx]} | Lag: {current_lag}", fontsize=22)
+            fig_mc.suptitle(f"10 Monte Carlo Samples | Sample {test_indices[batch_idx]} | Lag: {current_lag}", fontsize=13)
             for i in range(10):
                 row, col = i // 5, i % 5
-                _local_plot(sample_pred_runs[i], "jet", *color_limits["state"], f"MC Run {i+1}", axes_mc[row, col])
+                _local_plot(sample_pred_runs[i], "jet", *color_limits["state"], f"MC Run {i+1}", axes_mc[row, col], title_size=9.5)
             plt.tight_layout(rect=[0, 0, 1, 0.95])
             plt.savefig(logs_dir / f"mc_10_samples_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
             plt.close(fig_mc)
@@ -721,11 +732,11 @@ def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_colla
             sample_target = y_target_cpu[batch_idx]
             sample_sq_error = (sample_pred - sample_target) ** 2
 
-            def _local_plot(val_array, cmap, vmin, vmax, title, ax):
+            def _local_plot(val_array, cmap, vmin, vmax, title, ax, title_size=12):
                 plt.sca(ax)
                 plot_with_colorbar(val_array, Yh, cmap=cmap, vmin=vmin, vmax=vmax, label=title)
                 plt.scatter(context[:, 0], context[:, 1], color='red', s=20)
-                ax.set_title(title, fontsize=22)
+                ax.set_title(title, fontsize=title_size)
                 ax.axis('off')
 
             if is_probabilistic and y_pred_var is not None:
@@ -925,12 +936,15 @@ def main(USE_MU):
         x_pos, y_pos = sensor_coords[i, 0], sensor_coords[i, 1]
         ax.scatter(x_pos, y_pos, color='red', s=80, marker='X', edgecolor='black', linewidth=1.5, zorder=5)
         ax.annotate(str(sensor_idx), (x_pos, y_pos), xytext=(8, 8), textcoords='offset points',
-                    color='black', fontsize=11, fontweight='bold',
+                    color='black', fontweight='bold',
                     bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", lw=0.8, alpha=0.9), zorder=6)
 
-    ax.set_title(f"Ground Truth (Test Trajectory {sample_idx}, Time = {time_idx}) with Sensor Locations", fontsize=15)
-    ax.set_xlabel("X Coordinate", fontsize=12)
-    ax.set_ylabel("Y Coordinate", fontsize=12)
+    ax.set_title(f"Ground Truth (Test Trajectory {sample_idx}, Time = {time_idx}) with Sensor Locations", fontsize=11) # Was 15
+    ax.set_xlabel("X Coordinate", fontsize=10) # Was 12
+    ax.set_ylabel("Y Coordinate", fontsize=10) # Was 12
+    ax.annotate(str(sensor_idx), (x_pos, y_pos), xytext=(8, 8), textcoords='offset points',
+                color='black', fontsize=8.5, fontweight='bold', # Was 11
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", lw=0.8, alpha=0.9), zorder=6)
     plt.tight_layout()
     sensor_plot_path = logs_dir / "ground_truth_sensors.png"
     fig.savefig(sensor_plot_path, dpi=300, bbox_inches="tight")
