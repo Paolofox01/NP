@@ -584,10 +584,10 @@ def run_experiment(USE_MU, USE_DEEPONET_DECODER=False):
     else:
         x_dim = 3  # Input dimension: [time, x, y] coordinates (actual mesh coordinates!)
     y_dim = 1  # Output dimension: state value
-    r_dim = 32  # Representation dimension
-    z_dim = 64 # Latent dimension
-    hidden_dim = 64  # Hidden layer dimension
-    n_hidden = 1  # Number of hidden layers
+    r_dim = 128  # Representation dimension
+    z_dim = 128 # Latent dimension
+    hidden_dim = 128  # Hidden layer dimension
+    n_hidden = 2  # Number of hidden layers
 
     # Create model
     model = LatNP(
