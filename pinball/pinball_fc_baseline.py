@@ -462,7 +462,7 @@ def run_experiment(USE_MU):
         train_nll, train_mse = train_one_DoN_epoch(model, train_loader, optimizer, device, mse_weight=mse_weight)
         
         val_loss = evaluate_DoN_loss(model, val_loader, device)
-        scheduler.step()
+        scheduler.step(val_loss)
 
         if val_loss < best_val and epoch > mse_decay_epochs:
             best_val = val_loss
