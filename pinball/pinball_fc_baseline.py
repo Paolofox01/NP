@@ -443,13 +443,13 @@ def run_experiment(USE_MU):
 
     num_epochs = 3000
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-3, weight_decay=0.0)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=256, min_lr=1e-5)
     
     best_val = float("inf")
     patience = 1000
     no_improve = 0
     initial_mse_weight = 1.0   
-    mse_decay_epochs = 1500     
+    mse_decay_epochs = 50     
 
     # --------------------------------------------------------------------------
     # 4. Training Loop
