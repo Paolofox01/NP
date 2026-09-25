@@ -58,7 +58,7 @@ if IS_KAGGLE:
     BASE_DATA_DIR = Path("/kaggle/input/datasets/filippovolpicelli/pinball-data")
     KAGGLE_NB1 = Path("/kaggle/input/notebooks/filippovolpicelli/pinball-nb/NP/pinball")
     KAGGLE_NB2 = Path("/kaggle/input/notebooks/filippovolpicelli/notebookae593e1af4/NP/pinball")
-    KAGGLE_NB3 = Path("/kaggle/input/notebooks/nomecognome02873/pinball-lnp/NP/pinball")
+    KAGGLE_NB3 = Path("/kaggle/input/datasets/nomecognome02873/pinball-models/NP/pinball")
     KAGGLE_NB4 = Path("/kaggle/input/notebooks/nomecognome02873/fork-of-pinball-lnp-95811a/NP/pinball")
     OUTPUT_LOGS_DIR = Path("/kaggle/working/logs_compare")
     
