@@ -6,7 +6,6 @@ import math
 from pathlib import Path
 from functools import partial
 
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -24,8 +23,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # Domain & Model modules
-
-from sklearn.utils.extmath import randomized_svd
 from LNP.models import SHRED
 from processdata import trajectory, trajectories, multiplot
 from LNP.LatentNP import LatNP
@@ -41,12 +38,12 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
 
 plt.rcParams.update({
-    'axes.titlesize': 13,      # Title above each subplot
-    'figure.titlesize': 12,    # Main figure suptitle
+    'axes.titlesize': 12,      # Title above each subplot
+    'figure.titlesize': 13,    # Main figure suptitle
     'axes.labelsize': 10,      # X and Y axis names
-    'xtick.labelsize': 9,     # Numbers on X axis
-    'ytick.labelsize': 9,     # Numbers on Y axis
-    'legend.fontsize': 9,     # Legend font size
+    'xtick.labelsize': 9,      # Numbers on X axis
+    'ytick.labelsize': 9,      # Numbers on Y axis
+    'legend.fontsize': 9,      # Legend font size
 })
 
 # ============================================================
@@ -283,6 +280,38 @@ def vec2fun(yvec, Yh):
     y.vector()[:] = yvec
     return y
 
+def compute_dataset_diagnostic_limits(
+    targets: torch.Tensor,
+    max_standardized_error: float = 10.0,
+) -> dict[str, tuple[float, float]]:
+    """
+    Computes static, physically grounded color limits across a collection of targets.
+    Works for 2D tensors [N, nstate] or full target fields.
+    """
+    t_float = targets.float()
+    state_min = float(t_float.min().item())
+    state_max = float(t_float.max().item())
+    if np.isclose(state_min, state_max):
+        state_min -= 1e-4
+        state_max += 1e-4
+
+    ref_std = max(float(t_float.std().item()), 1e-8)
+    ref_variance = ref_std ** 2
+
+    # Theoretical Gaussian maximum log-likelihood: -0.5 * ln(2*pi*sigma^2)
+    max_log_likelihood = -0.5 * math.log(2.0 * math.pi * ref_variance)
+    min_log_likelihood = max_log_likelihood - 0.5 * max_standardized_error
+
+    return {
+        "state": (state_min, state_max),
+        "squared_error": (0.0, (2.0 * ref_std) ** 2),
+        "standard_deviation": (0.0, 1.5 * ref_std),
+        "log_likelihood": (min_log_likelihood, max_log_likelihood),
+        "standardized_error": (0.0, max_standardized_error),
+    }
+
+diagnostic_color_limits = compute_dataset_diagnostic_limits
+
 def plot_with_colorbar(y, Yh, ax=None, cmap="jet", vmin=None, vmax=None, label=None, cbar_kwargs=None):
     if ax is None: ax = plt.gca()
     else: plt.sca(ax)
@@ -290,7 +319,7 @@ def plot_with_colorbar(y, Yh, ax=None, cmap="jet", vmin=None, vmax=None, label=N
     if cbar_kwargs is None: cbar_kwargs = {"shrink": 0.75, "pad": 0.02}
     cbar = plt.colorbar(mappable, ax=ax, **cbar_kwargs)
     cbar.ax.tick_params(labelsize=8.5)
-    cbar.set_label(label, size = 9.5)
+    cbar.set_label(label, size=9.5)
     return mappable
 
 # ==============================================================================
@@ -476,49 +505,46 @@ def compute_standardized_se(y_pred_mean, y_pred_var, y_true):
     var_clamp = y_pred_var.clamp_min(1e-8)
     return ((y_true - y_pred_mean)**2) / var_clamp
 
-def diagnostic_color_limits(targets):
-    state_min, state_max = targets.amin().item(), targets.amax().item()
-    reference_std = max(targets.std().item(), 1e-8)
-    reference_variance = reference_std ** 2
-    max_standardized_error = 10.0
-    
-    max_log_likelihood = -0.5 * math.log(2.0 * math.pi * reference_variance)
-    min_log_likelihood = max_log_likelihood - 0.5 * max_standardized_error
-
-    return {
-        "state": (state_min, state_max),
-        # Scale to meaningful error ranges (e.g., 2 to 3 standard deviations)
-        "squared_error": (0.0, (2.0 * reference_std) ** 2),
-        "standard_deviation": (0.0, 1.5 * reference_std),
-        "log_likelihood": (min_log_likelihood, max_log_likelihood),
-        "standardized_error": (0.0, max_standardized_error),
-    }
-    
 plt.style.use('default')
 
 METHOD_STYLES = {
-    "ANP": {"color": "#E63946", "linestyle": "-", "linewidth": 2.2, "alpha": 0.85},
-    "NP": {"color": "#457B9D", "linestyle": "--", "linewidth": 2.2, "alpha": 0.85},
+    "ANP":           {"color": "#E63946", "linestyle": "-",  "linewidth": 2.2, "alpha": 0.85},
+    "LNP":           {"color": "#457B9D", "linestyle": "--", "linewidth": 2.2, "alpha": 0.85},
     "Prob-DeepONet": {"color": "#2A9D8F", "linestyle": "-.", "linewidth": 2.2, "alpha": 0.85},
-    "SHRED": {"color": "#8338EC", "linestyle": ":", "linewidth": 2.2, "alpha": 0.85},
-    "Context-GP": {"color": "#F4A261", "linestyle": "-", "linewidth": 2.2, "alpha": 0.85},
-    "DeepONet": {"color": "#E9C46A", "linestyle": ":", "linewidth": 2.2, "alpha": 0.85}
+    "SHRED":         {"color": "#8338EC", "linestyle": ":",  "linewidth": 2.2, "alpha": 0.85},
+    "Context-GP":    {"color": "#F4A261", "linestyle": "-",  "linewidth": 2.2, "alpha": 0.85},
+    "DeepONet":      {"color": "#E9C46A", "linestyle": ":",  "linewidth": 2.2, "alpha": 0.85},
 }
 
 def _plot_row(ax_hist, ax_box, data_dict, title, xlabel, bins, clip_pct, log_scale=False):
-    if not data_dict: return
-    all_vals = np.concatenate([v for v in data_dict.values()])
-    x_lo, x_hi = np.percentile(all_vals, clip_pct), np.percentile(all_vals, 100 - clip_pct)
-    legend_handles = []
+    valid_items = {k: v[np.isfinite(v)] for k, v in data_dict.items() if len(v) > 0 and np.any(np.isfinite(v))}
+    if not valid_items:
+        ax_hist.text(0.5, 0.5, "N/A", ha="center", va="center", transform=ax_hist.transAxes)
+        ax_box.text(0.5, 0.5, "N/A", ha="center", va="center", transform=ax_box.transAxes)
+        ax_hist.set_title(title)
+        ax_box.set_title(f"Box Plot: {title}")
+        return
 
-    for name, vals in data_dict.items():
-        style = METHOD_STYLES.get(name, {"color": "#000000", "linestyle": "-", "linewidth": 2, "alpha": 0.8})
+    all_vals = np.concatenate(list(valid_items.values()))
+    x_lo, x_hi = np.percentile(all_vals, clip_pct), np.percentile(all_vals, 100 - clip_pct)
+    if x_lo == x_hi:
+        x_lo -= 1e-4
+        x_hi += 1e-4
+
+    legend_handles = []
+    for name, vals in valid_items.items():
+        style = METHOD_STYLES.get(name, {"color": "#000000", "linestyle": "-", "linewidth": 2.2, "alpha": 0.85})
         clipped = vals[(vals >= x_lo) & (vals <= x_hi)]
-        eff_bins = min(bins, max(10, len(clipped) // 2))
+        if len(clipped) == 0:
+            continue
+        eff_bins = min(bins, max(10, len(clipped) // 4))
 
         counts, edges = np.histogram(clipped, bins=eff_bins, density=True)
-        ax_hist.hist(clipped, bins=eff_bins, density=True, color=style["color"], alpha=style["alpha"]*0.55)
-        ax_hist.plot(0.5*(edges[:-1]+edges[1:]), counts, color=style["color"], linestyle=style["linestyle"], linewidth=style["linewidth"])
+        ax_hist.hist(clipped, bins=eff_bins, density=True, color=style["color"], alpha=style.get("alpha", 0.85) * 0.45)
+        ax_hist.plot(
+            0.5 * (edges[:-1] + edges[1:]), counts,
+            color=style["color"], linestyle=style.get("linestyle", "-"), linewidth=style.get("linewidth", 2.2),
+        )
         ax_hist.axvline(float(np.median(vals)), color=style["color"], linewidth=1.2, linestyle="--")
         legend_handles.append(mpatches.Patch(color=style["color"], label=name))
 
@@ -526,45 +552,53 @@ def _plot_row(ax_hist, ax_box, data_dict, title, xlabel, bins, clip_pct, log_sca
     ax_hist.set_xlabel(xlabel)
     ax_hist.set_ylabel("Density")
     ax_hist.set_title(title)
-    ax_hist.tick_params(axis='both')
-    ax_hist.legend(handles=legend_handles, framealpha=0.85)
+    if legend_handles:
+        ax_hist.legend(handles=legend_handles, framealpha=0.85)
 
-    bp_data, bp_names = list(data_dict.values()), list(data_dict.keys())
-    flier_style = dict(marker='o', markerfacecolor='black', markersize=2, alpha=0.1, linestyle='none', markeredgecolor='none')
+    bp_names = list(valid_items.keys())
+    bp_data = [valid_items[k] for k in bp_names]
+    if bp_data:
+        flier_style = dict(marker="o", markerfacecolor="black", markersize=2, alpha=0.1, linestyle="none", markeredgecolor="none")
+        bplot = ax_box.boxplot(bp_data, vert=True, patch_artist=True, notch=False, showfliers=False, flierprops=flier_style)
+        for patch, name in zip(bplot["boxes"], bp_names):
+            colour = METHOD_STYLES.get(name, {"color": "#000"})["color"]
+            patch.set_facecolor(colour)
+            patch.set_alpha(0.70)
 
-    bplot = ax_box.boxplot(bp_data, vert=True, patch_artist=True, notch=True, showfliers=False, flierprops=flier_style)
-    for patch, colour in zip(bplot["boxes"], [METHOD_STYLES.get(n, {"color": "#000"})["color"] for n in bp_names]):
-        patch.set_facecolor(colour); patch.set_alpha(0.70)
+        ax_box.set_xticks(range(1, len(bp_names) + 1))
+        ax_box.set_xticklabels(bp_names, rotation=15)
+        ax_box.set_ylabel(xlabel)
+        ax_box.set_title(f"Box Plot: {title}")
 
-    ax_box.set_xticks(range(1, len(bp_names) + 1))
-    ax_box.set_xticklabels(bp_names, rotation=0)
-    ax_box.set_ylabel(xlabel)
-    ax_box.set_title(f"Box Plot: {title}")
-    ax_box.tick_params(axis='both')
-
-    if log_scale in [True, 'log']: ax_box.set_yscale('log')
-    elif log_scale == 'symlog': ax_box.set_yscale('symlog')
+        if log_scale in [True, "log"]:
+            ax_box.set_yscale("log")
+        elif log_scale == "symlog":
+            ax_box.set_yscale("symlog")
 
 def print_diagnostic_summary(diagnostics):
     """Print descriptive statistics for every model in each diagnostic."""
-    print("\nDIAGNOSTIC SUMMARY")
+    print(f"\n{'=' * 75}")
+    print("  DIAGNOSTIC COMPARISON SUMMARY")
+    print(f"{'=' * 75}")
     for diagnostic_name, values_by_model in diagnostics.items():
-        print(f"\n{diagnostic_name}")
+        print(f"\n  -- {diagnostic_name} --")
         for model_name, values in values_by_model.items():
-            values = np.asarray(values, dtype=float).reshape(-1)
-            if values.size == 0:
-                print(f"  {model_name}: no values")
+            vals = np.asarray(values, dtype=float).reshape(-1)
+            vals = vals[np.isfinite(vals)]
+            if vals.size == 0:
+                print(f"    {model_name:<26}: no valid values")
                 continue
 
-            mean = values.mean()
-            median = np.median(values)
-            std = values.std()
+            mean = vals.mean()
+            median = np.median(vals)
+            std = vals.std()
             relative_std = std / abs(mean) if not np.isclose(mean, 0.0) else np.nan
-            relative_std_text = f"{relative_std:.2%}" if np.isfinite(relative_std) else "n/a (mean is zero)"
+            relative_std_text = f"{relative_std:.2%}" if np.isfinite(relative_std) else "n/a"
             print(
-                f"  {model_name}: mean={mean:.6g}, median={median:.6g}, "
-                f"std={std:.6g}, relative std={relative_std_text}"
+                f"    {model_name:<26}: mean={mean: .4e}  median={median: .4e}  "
+                f"std={std: .4e}  rel_std={relative_std_text:>9}"
             )
+    print(f"{'=' * 75}\n")
 
 def plot_all_distributions(ll_dict, se_dict, sse_dict, mse_dict, out_path, bins=80, clip_pct=0.5):
     print_diagnostic_summary({
@@ -573,22 +607,25 @@ def plot_all_distributions(ll_dict, se_dict, sse_dict, mse_dict, out_path, bins=
         "Squared error": se_dict,
         "Per-sample MSE": mse_dict,
     })
-    fig, axes = plt.subplots(4, 2, figsize=(6.5, 5.5), gridspec_kw={"width_ratios": [2, 1.25]})
+    fig, axes = plt.subplots(4, 2, figsize=(12, 13), gridspec_kw={"width_ratios": [2.0, 1.25]})
     _plot_row(axes[0, 0], axes[0, 1], ll_dict, "Log-Likelihood Distribution", "Per-node log-likelihood", bins, clip_pct, log_scale=False)
     _plot_row(axes[1, 0], axes[1, 1], sse_dict, "Standardized Squared Errors (SSE)", "Per-node SSE", bins, clip_pct, log_scale=False)
     _plot_row(axes[2, 0], axes[2, 1], se_dict, "Squared Error (SE) Distribution", "Per-node Squared Error", bins, clip_pct * 2, log_scale=False)
     _plot_row(axes[3, 0], axes[3, 1], mse_dict, "Mean Squared Errors (MSE)", "Per-sample MSE", bins, clip_pct, log_scale=False)
 
-    fig.tight_layout(pad=3.0)
-    plt.subplots_adjust(hspace=0.2, wspace=0.2)
+    fig.tight_layout(pad=2.0)
     fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
+    print(f"  Saved comparison diagnostic distributions to: {out_path}")
 
 # ============================================================
 # 4. SINGLE BATCH EVALUATION & GRID PLOTTING
 # ============================================================
-def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, fixed_sens, Yh, USE_MU, device, logs_dir, color_limits, model_format="np"):
-    """Valuta un batch singolo per Neural Processes generando la griglia 2x3 e i 10 campioni MC 2x5."""
+def plot_batch_diagnostics(
+    model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm,
+    fixed_sens, Yh, USE_MU, device, logs_dir, color_limits, model_name="ANP", model_format="np"
+):
+    """Valuta un batch per Neural Processes generando la griglia 2x3 e i 10 campioni MC 2x5."""
     model.eval()
     test_indices = np.array([0, 1, 2])
     test_batch = [test_dataset[idx] for idx in test_indices]
@@ -606,7 +643,9 @@ def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, 
             model_format=model_format
         )
 
-        x_context, y_context, x_target = x_context.to(device), y_context.to(device) if y_context is not None else None, x_target.to(device)
+        x_context = x_context.to(device)
+        y_context = y_context.to(device) if y_context is not None else None
+        x_target = x_target.to(device)
 
         num_mc_samples = 100
         with torch.no_grad():
@@ -640,38 +679,43 @@ def plot_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, 
             sample_log_lik = log_lik_all[batch_idx]
             sample_sse = sample_sq_error / sample_total_var.clamp_min(1e-8)
 
-            def _local_plot(val_array, cmap, vmin, vmax, title, ax, title_size=12):
+            def _local_plot(val_array, cmap, vmin, vmax, title, ax, title_size=11):
                 plt.sca(ax)
                 plot_with_colorbar(val_array, Yh, cmap=cmap, vmin=vmin, vmax=vmax, label=title)
-                plt.scatter(context[:, 0], context[:, 1], color='red', s=20)
+                plt.scatter(context[:, 0], context[:, 1], color='red', marker='X', s=45, edgecolor='black', linewidths=1.2, zorder=5)
                 ax.set_title(title, fontsize=title_size)
                 ax.axis('off')
 
             # 2x3 Diagnostic Grid
             fig, axes = plt.subplots(2, 3, figsize=(11, 7))
             _local_plot(sample_target, "jet", *color_limits["state"], "Truth", axes[0, 0])
-            _local_plot(sample_pred, "jet", *color_limits["state"], "Mean Prediction", axes[0, 1])
+            _local_plot(sample_pred, "jet", *color_limits["state"], f"{model_name} Mean", axes[0, 1])
             _local_plot(sample_sq_error, "magma", *color_limits["squared_error"], "Squared Error (MSE)", axes[0, 2])
             _local_plot(sample_total_std, "magma", *color_limits["standard_deviation"], "Standard Deviation", axes[1, 0])
             _local_plot(sample_log_lik, "magma", *color_limits["log_likelihood"], "Log-likelihood", axes[1, 1])
             _local_plot(sample_sse, "magma", *color_limits["standardized_error"], "Standardized SE", axes[1, 2])
 
+            fig.suptitle(f"{model_name} Diagnostics | Sample {test_indices[batch_idx]} | Lag {current_lag}", fontsize=11)
             plt.tight_layout(rect=[0, 0, 1, 0.95])
-            plt.savefig(logs_dir / f"multiplot_grid_2x3_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
+            plt.savefig(logs_dir / f"multiplot_grid_2x3_{model_name.lower()}_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
             plt.close(fig)
 
             # 2x5 Monte Carlo Samples Grid
             fig_mc, axes_mc = plt.subplots(2, 5, figsize=(11, 4))
-            fig_mc.suptitle(f"10 Monte Carlo Samples | Sample {test_indices[batch_idx]} | Lag: {current_lag}", fontsize=13)
+            fig_mc.suptitle(f"{model_name} (10 MC Samples) | Sample {test_indices[batch_idx]} | Lag {current_lag}", fontsize=11)
             for i in range(10):
                 row, col = i // 5, i % 5
                 _local_plot(sample_pred_runs[i], "jet", *color_limits["state"], f"MC Run {i+1}", axes_mc[row, col], title_size=9.5)
             plt.tight_layout(rect=[0, 0, 1, 0.95])
-            plt.savefig(logs_dir / f"mc_10_samples_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
+            plt.savefig(logs_dir / f"mc_10_samples_{model_name.lower()}_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
             plt.close(fig_mc)
 
-def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm, fixed_sens, Yh, USE_MU, device, logs_dir, color_limits, is_probabilistic=False, model_format="don", likelihood=None, y_mean=None, y_std=None):
-    """Valuta un batch per DeepONet o Gaussian Process."""
+def plot_non_mc_batch_diagnostics(
+    model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm,
+    fixed_sens, Yh, USE_MU, device, logs_dir, color_limits, model_name="DeepONet",
+    is_probabilistic=False, model_format="don", likelihood=None, y_mean=None, y_std=None
+):
+    """Valuta un batch per DeepONet, Prob-DeepONet, GP o SHRED."""
     model.eval()
     if likelihood is not None: likelihood.eval()
     
@@ -733,36 +777,35 @@ def plot_non_mc_batch_diagnostics(model, test_dataset, spatiotemporal_test_colla
             sample_target = y_target_cpu[batch_idx]
             sample_sq_error = (sample_pred - sample_target) ** 2
 
-            def _local_plot(val_array, cmap, vmin, vmax, title, ax, title_size=12):
+            def _local_plot(val_array, cmap, vmin, vmax, title, ax, title_size=11):
                 plt.sca(ax)
                 plot_with_colorbar(val_array, Yh, cmap=cmap, vmin=vmin, vmax=vmax, label=title)
-                plt.scatter(context[:, 0], context[:, 1], color='red', s=20)
+                plt.scatter(context[:, 0], context[:, 1], color='red', marker='X', s=45, edgecolor='black', linewidths=1.2, zorder=5)
                 ax.set_title(title, fontsize=title_size)
                 ax.axis('off')
 
             if is_probabilistic and y_pred_var is not None:
-                sample_var = y_pred_var[batch_idx]
-                sample_std = torch.sqrt(sample_var.clamp_min(1e-8))
-                sample_sse = sample_sq_error / sample_var.clamp_min(1e-8)
-                
-                var_clamp = sample_var.clamp_min(1e-8)
-                sample_log_lik = -0.5 * (math.log(2 * math.pi) + torch.log(var_clamp) + sample_sse)
+                sample_var = y_pred_var[batch_idx].clamp_min(1e-8)
+                sample_std = torch.sqrt(sample_var)
+                sample_sse = sample_sq_error / sample_var
+                sample_log_lik = -0.5 * (math.log(2.0 * math.pi) + torch.log(sample_var) + sample_sse)
 
                 fig, axes = plt.subplots(2, 3, figsize=(11, 7))
                 _local_plot(sample_target, "jet", *color_limits["state"], "Truth", axes[0, 0])
-                _local_plot(sample_pred, "jet", *color_limits["state"], "Mean Prediction", axes[0, 1])
+                _local_plot(sample_pred, "jet", *color_limits["state"], f"{model_name} Mean", axes[0, 1])
                 _local_plot(sample_sq_error, "magma", *color_limits["squared_error"], "Squared Error (MSE)", axes[0, 2])
                 _local_plot(sample_std, "magma", *color_limits["standard_deviation"], "Standard Deviation", axes[1, 0])
                 _local_plot(sample_log_lik, "magma", *color_limits["log_likelihood"], "Log-likelihood", axes[1, 1])
                 _local_plot(sample_sse, "magma", *color_limits["standardized_error"], "Standardized SE", axes[1, 2])
-                grid_suffix = "prob_2x3"
+                grid_suffix = f"prob_2x3_{model_name.lower()}"
             else:
                 fig, axes = plt.subplots(1, 3, figsize=(11, 4))
                 _local_plot(sample_target, "jet", *color_limits["state"], "Truth", axes[0])
-                _local_plot(sample_pred, "jet", *color_limits["state"], "Prediction", axes[1])
+                _local_plot(sample_pred, "jet", *color_limits["state"], f"{model_name} Prediction", axes[1])
                 _local_plot(sample_sq_error, "magma", *color_limits["squared_error"], "Squared Error", axes[2])
-                grid_suffix = "det_1x3"
+                grid_suffix = f"det_1x3_{model_name.lower()}"
 
+            fig.suptitle(f"{model_name} Diagnostics | Sample {test_indices[batch_idx]} | Lag {current_lag}", fontsize=11)
             plt.tight_layout(rect=[0, 0, 1, 0.95])
             plt.savefig(logs_dir / f"multiplot_grid_{grid_suffix}_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
             plt.close(fig)
@@ -787,7 +830,6 @@ def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coord
             y_c = y_c.to(device)
             if noise_std > 0.0:
                 y_c = y_c + noise_std * torch.randn_like(y_c)
-            
 
         with torch.no_grad():
             if model_format == "gp":
@@ -905,7 +947,7 @@ def main(USE_MU):
     Ytest = Y[idx_test].reshape(idx_test.shape[0], ntimes, nstate)
     MUtest = MU[idx_test]
     test_dataset = SpatiotemporalDataset(Ytest, MUtest if USE_MU else None)
-    color_limits = diagnostic_color_limits(Ytest)
+    color_limits = compute_dataset_diagnostic_limits(Ytest)
 
     # 3. Iperparametri Modelli
     x_dim = 6 if USE_MU else 3
@@ -931,21 +973,18 @@ def main(USE_MU):
     sensor_coords = mesh_coordinates[fixed_sens].cpu().numpy()
 
     fig, ax = plt.subplots(figsize=(6, 3))
-    plot_with_colorbar(truth_field, Yh, ax=ax, cmap="jet", label="True State")
+    plot_with_colorbar(truth_field, Yh, ax=ax, cmap="jet", vmin=color_limits["state"][0], vmax=color_limits["state"][1], label="True State")
 
     for i, sensor_idx in enumerate(fixed_sens):
         x_pos, y_pos = sensor_coords[i, 0], sensor_coords[i, 1]
         ax.scatter(x_pos, y_pos, color='red', s=80, marker='X', edgecolor='black', linewidth=1.5, zorder=5)
         ax.annotate(str(sensor_idx), (x_pos, y_pos), xytext=(8, 8), textcoords='offset points',
-                    color='black', fontweight='bold',
+                    color='black', fontsize=8.5, fontweight='bold',
                     bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", lw=0.8, alpha=0.9), zorder=6)
 
-    ax.set_title(f"Ground Truth (Test Trajectory {sample_idx}, Time = {time_idx}) with Sensor Locations", fontsize=11) # Was 15
-    ax.set_xlabel("X Coordinate", fontsize=10) # Was 12
-    ax.set_ylabel("Y Coordinate", fontsize=10) # Was 12
-    ax.annotate(str(sensor_idx), (x_pos, y_pos), xytext=(8, 8), textcoords='offset points',
-                color='black', fontsize=8.5, fontweight='bold', # Was 11
-                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", lw=0.8, alpha=0.9), zorder=6)
+    ax.set_title(f"Ground Truth | Sample {sample_idx} (Time = {time_idx}) with Sensor Locations", fontsize=11)
+    ax.set_xlabel("X Coordinate", fontsize=10)
+    ax.set_ylabel("Y Coordinate", fontsize=10)
     plt.tight_layout()
     sensor_plot_path = logs_dir / "ground_truth_sensors.png"
     fig.savefig(sensor_plot_path, dpi=300, bbox_inches="tight")
@@ -969,7 +1008,7 @@ def main(USE_MU):
     plot_batch_diagnostics(
         model=model_anp, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
-        device=device, logs_dir=logs_dir / "logs_anp", color_limits=color_limits, model_format="np"
+        device=device, logs_dir=logs_dir / "logs_anp", color_limits=color_limits, model_name="ANP", model_format="np"
     )
 
     # 5B. Multi-Lag Global Distribution Evaluation ANP
@@ -1027,7 +1066,7 @@ def main(USE_MU):
     plot_batch_diagnostics(
         model=model_lnp, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
-        device=device, logs_dir=logs_dir / "logs_lnp", color_limits=color_limits, model_format="np"
+        device=device, logs_dir=logs_dir / "logs_lnp", color_limits=color_limits, model_name="LNP", model_format="np"
     )
 
     # 6B. Multi-Lag Global Distribution Evaluation LNP
@@ -1066,7 +1105,6 @@ def main(USE_MU):
     print("RUNNING NOISE RESISTANCE ANALYSIS (ANP vs LNP, Lag 19)")
     print("="*60)
 
-    # Fractions of data standard deviation to inject: 0%, 5%, 10%, 20%, 50%
     noise_fractions = [0.0, 0.05, 0.10, 0.20, 0.50]
     noise_colors = ["#264653", "#2A9D8F", "#E9C46A", "#F4A261", "#E76F51"]
     fixed_lag = 19
@@ -1125,7 +1163,7 @@ def main(USE_MU):
         model=model_probdeeponet, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
         device=device, logs_dir=logs_dir / "logs_probdeeponet", color_limits=color_limits,
-        is_probabilistic=True, model_format="don"
+        model_name="Prob-DeepONet", is_probabilistic=True, model_format="don"
     )
 
     # ==============================================================================
@@ -1142,14 +1180,13 @@ def main(USE_MU):
         model=model_don, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
         device=device, logs_dir=logs_dir / "logs_deeponet", color_limits=color_limits,
-        is_probabilistic=False, model_format="don"
+        model_name="DeepONet", is_probabilistic=False, model_format="don"
     )
 
     # ==============================================================================
     # 9. CONTEXT GP
     # ==============================================================================
     print("\nInitializing Context-GP...")
-    # Il checkpoint salvato per il GP ha sempre 6 dimensioni (mu_0, mu_1, mu_2, time, x, y)
     gp_in_dim = 6
     likelihood_gp = gpytorch.likelihoods.GaussianLikelihood().to(device)
     dummy_x = torch.zeros(2, gp_in_dim).to(device)
@@ -1163,14 +1200,13 @@ def main(USE_MU):
     model_gp.eval()
     likelihood_gp.eval()
 
-    # Creazione dataset dedicato con MU garantito per il GP
     gp_dataset = SpatiotemporalDataset(Ytest, MUtest)
 
     plot_non_mc_batch_diagnostics(
         model=model_gp, test_dataset=gp_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=True,
         device=device, logs_dir=logs_dir / "logs_gp", color_limits=color_limits,
-        is_probabilistic=True, model_format="gp",
+        model_name="Context-GP", is_probabilistic=True, model_format="gp",
         likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std
     )
 
@@ -1179,8 +1215,6 @@ def main(USE_MU):
     # ==============================================================================
     print("\nRunning SHRED Evaluation...")
     try:
-        from LNP.models import SHRED
-
         shred_key = "shred_mu" if USE_MU else "shred_no_mu"
         shred_ckpt = CHECKPOINT_PATHS.get(shred_key, CHECKPOINT_PATHS.get("shred"))
         if shred_ckpt is None or not Path(shred_ckpt).exists():
@@ -1201,7 +1235,6 @@ def main(USE_MU):
                 f"provides {expected_input_size}."
             )
 
-        # SHRED predicts coefficients in the POD basis used during training.
         _, _, V_matrix = randomized_svd(
             Ytrain.reshape(-1, nstate).cpu().numpy(),
             n_components=kstate,
@@ -1219,7 +1252,6 @@ def main(USE_MU):
 
         shred_base.load_state_dict(shred_state)
         print(f"Loaded SHRED weights successfully: {shred_ckpt}")
-            
         shred_base.eval()
 
         class SHREDWrapper(nn.Module):
@@ -1249,14 +1281,12 @@ def main(USE_MU):
             model=model_shred, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
             mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
             device=device, logs_dir=logs_dir / "logs_shred", color_limits=color_limits,
-            is_probabilistic=False, model_format="don"
+            model_name="SHRED", is_probabilistic=False, model_format="don"
         )
-    except ImportError:
-        print("[!] Could not import SHRED from utils.models. Skipping SHRED.")
+    except Exception as e:
+        print(f"[!] Could not run SHRED: {e}. Skipping SHRED.")
         model_shred = None
 
-    
-    
     # ==============================================================================
     # 11. CONFRONTO DIRETTO DEI MODELLI (All Sensors, Lag 19)
     # ==============================================================================
