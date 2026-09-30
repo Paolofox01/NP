@@ -30,6 +30,7 @@ from LNP.LATNPsimple import LatNP_simple
 from architectures.Fourier import FourierFeatures, LearnableFourierFeatures
 from LNP.loss_np import ELBOLossNP
 from LNP.training import train_np
+from LNP.comparison_plots import plot_model_comparison, plot_probabilistic_diagnostics, to_numpy
 import gpytorch
 
 np.random.seed(42)
@@ -623,7 +624,8 @@ def plot_all_distributions(ll_dict, se_dict, sse_dict, mse_dict, out_path, bins=
 # ============================================================
 def plot_batch_diagnostics(
     model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm,
-    fixed_sens, Yh, USE_MU, device, logs_dir, color_limits, model_name="ANP", model_format="np"
+    fixed_sens, Yh, USE_MU, device, logs_dir, color_limits, model_name="ANP", model_format="np",
+    collector=None, collector_lag=19
 ):
     """Valuta un batch per Neural Processes generando la griglia 2x3 e i 10 campioni MC 2x5."""
     model.eval()
@@ -679,6 +681,10 @@ def plot_batch_diagnostics(
             sample_log_lik = log_lik_all[batch_idx]
             sample_sse = sample_sq_error / sample_total_var.clamp_min(1e-8)
 
+            if collector is not None and current_lag == collector_lag:   # keep it for the all-model comparison figures
+                entry = collector.setdefault(int(test_indices[batch_idx]), {"truth": to_numpy(sample_target), "models": {}})
+                entry["models"][model_name] = {"pred": to_numpy(sample_pred), "var": to_numpy(sample_total_var)}
+
             def _local_plot(val_array, cmap, vmin, vmax, title, ax, title_size=11):
                 plt.sca(ax)
                 plot_with_colorbar(val_array, Yh, cmap=cmap, vmin=vmin, vmax=vmax, label=title)
@@ -713,7 +719,8 @@ def plot_batch_diagnostics(
 def plot_non_mc_batch_diagnostics(
     model, test_dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm,
     fixed_sens, Yh, USE_MU, device, logs_dir, color_limits, model_name="DeepONet",
-    is_probabilistic=False, model_format="don", likelihood=None, y_mean=None, y_std=None
+    is_probabilistic=False, model_format="don", likelihood=None, y_mean=None, y_std=None,
+    collector=None, collector_lag=19
 ):
     """Valuta un batch per DeepONet, Prob-DeepONet, GP o SHRED."""
     model.eval()
@@ -777,6 +784,14 @@ def plot_non_mc_batch_diagnostics(
             sample_target = y_target_cpu[batch_idx]
             sample_sq_error = (sample_pred - sample_target) ** 2
 
+            if collector is not None and current_lag == collector_lag:   # keep it for the all-model comparison figures
+                collected_var = y_pred_var[batch_idx].clamp_min(1e-8) if (is_probabilistic and y_pred_var is not None) else None
+                entry = collector.setdefault(int(test_indices[batch_idx]), {"truth": to_numpy(sample_target), "models": {}})
+                entry["models"][model_name] = {
+                    "pred": to_numpy(sample_pred),
+                    "var": None if collected_var is None else to_numpy(collected_var),
+                }
+
             def _local_plot(val_array, cmap, vmin, vmax, title, ax, title_size=11):
                 plt.sca(ax)
                 plot_with_colorbar(val_array, Yh, cmap=cmap, vmin=vmin, vmax=vmax, label=title)
@@ -809,6 +824,41 @@ def plot_non_mc_batch_diagnostics(
             plt.tight_layout(rect=[0, 0, 1, 0.95])
             plt.savefig(logs_dir / f"multiplot_grid_{grid_suffix}_sample{test_indices[batch_idx]}_time{eval_time_idx}_lag{current_lag}.png", dpi=300, bbox_inches="tight")
             plt.close(fig)
+
+def plot_pinball_comparisons(collector, Yh, fixed_sens, mesh_coordinates_norm, color_limits, out_dir, lag=19, time_idx=30,
+                             pinball_panel_aspect=2.0):   # width / height of the mesh domain: adjust to your mesh
+    """All-model comparison figures for every collected test trajectory (final time, Lag 19 for all models):
+       (1) truth | prediction (mean or point prediction) | squared error, one row per model;
+       (2) truth | mean | squared error | std. deviation | log-likelihood | standardized SE, one row per
+           probabilistic model.  Every column shares one colour scale."""
+    if not collector:
+        print("  [comparison] no model data collected, skipping the comparison figures.")
+        return
+    sensor_xy = to_numpy(mesh_coordinates_norm)[np.asarray(fixed_sens, dtype=int)]
+
+    def _draw(ax, values, cmap, vmin, vmax):
+        plt.sca(ax)
+        mappable = plot(vec2fun(np.asarray(values, dtype=float), Yh), cmap=cmap, vmin=vmin, vmax=vmax)
+        ax.scatter(sensor_xy[:, 0], sensor_xy[:, 1], color='red', marker='X', s=18, edgecolor='black', linewidths=0.6, zorder=5)
+        ax.axis('off')
+        return mappable
+
+    for sample_index, data in sorted(collector.items()):
+        plot_model_comparison(
+            data["models"], data["truth"], _draw,
+            Path(out_dir) / f"comparison_all_models_sample{sample_index}_time{time_idx}_lag{lag}.png",
+            color_limits=color_limits,
+            title=f"All models | Sample {sample_index} | Lag {lag}",
+            panel_aspect=pinball_panel_aspect,
+        )
+        plot_probabilistic_diagnostics(
+            data["models"], data["truth"], _draw,
+            Path(out_dir) / f"comparison_probabilistic_diagnostics_sample{sample_index}_time{time_idx}_lag{lag}.png",
+            color_limits=color_limits,
+            title=f"Probabilistic models | Sample {sample_index} | Lag {lag}",
+            panel_aspect=pinball_panel_aspect,
+        )
+
 
 def evaluate_scenario(model, dataset, spatiotemporal_test_collate_fn, mesh_coordinates_norm,
                       device, time_idx, lag, sensors_to_use, drop_options, mc_samples=100,
@@ -948,6 +998,7 @@ def main(USE_MU):
     MUtest = MU[idx_test]
     test_dataset = SpatiotemporalDataset(Ytest, MUtest if USE_MU else None)
     color_limits = compute_dataset_diagnostic_limits(Ytest)
+    comparison_data = {}   # predictions of every model at Lag 19, for the all-model comparison figures
 
     # 3. Iperparametri Modelli
     x_dim = 6 if USE_MU else 3
@@ -1008,7 +1059,7 @@ def main(USE_MU):
     plot_batch_diagnostics(
         model=model_anp, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
-        device=device, logs_dir=logs_dir / "logs_anp", color_limits=color_limits, model_name="ANP", model_format="np"
+        device=device, logs_dir=logs_dir / "logs_anp", color_limits=color_limits, model_name="ANP", model_format="np", collector=comparison_data
     )
 
     # 5B. Multi-Lag Global Distribution Evaluation ANP
@@ -1066,7 +1117,7 @@ def main(USE_MU):
     plot_batch_diagnostics(
         model=model_lnp, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
-        device=device, logs_dir=logs_dir / "logs_lnp", color_limits=color_limits, model_name="LNP", model_format="np"
+        device=device, logs_dir=logs_dir / "logs_lnp", color_limits=color_limits, model_name="LNP", model_format="np", collector=comparison_data
     )
 
     # 6B. Multi-Lag Global Distribution Evaluation LNP
@@ -1163,7 +1214,7 @@ def main(USE_MU):
         model=model_probdeeponet, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
         device=device, logs_dir=logs_dir / "logs_probdeeponet", color_limits=color_limits,
-        model_name="Prob-DeepONet", is_probabilistic=True, model_format="don"
+        model_name="Prob-DeepONet", is_probabilistic=True, model_format="don", collector=comparison_data
     )
 
     # ==============================================================================
@@ -1180,7 +1231,7 @@ def main(USE_MU):
         model=model_don, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
         device=device, logs_dir=logs_dir / "logs_deeponet", color_limits=color_limits,
-        model_name="DeepONet", is_probabilistic=False, model_format="don"
+        model_name="DeepONet", is_probabilistic=False, model_format="don", collector=comparison_data
     )
 
     # ==============================================================================
@@ -1207,7 +1258,7 @@ def main(USE_MU):
         mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=True,
         device=device, logs_dir=logs_dir / "logs_gp", color_limits=color_limits,
         model_name="Context-GP", is_probabilistic=True, model_format="gp",
-        likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std
+        likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std, collector=comparison_data
     )
 
     # ==============================================================================
@@ -1281,11 +1332,16 @@ def main(USE_MU):
             model=model_shred, test_dataset=test_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
             mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=USE_MU,
             device=device, logs_dir=logs_dir / "logs_shred", color_limits=color_limits,
-            model_name="SHRED", is_probabilistic=False, model_format="don"
+            model_name="SHRED", is_probabilistic=False, model_format="don", collector=comparison_data
         )
     except Exception as e:
         print(f"[!] Could not run SHRED: {e}. Skipping SHRED.")
         model_shred = None
+
+    try:
+        plot_pinball_comparisons(comparison_data, Yh, fixed_sens, mesh_coordinates_norm, color_limits, logs_dir / "comparison_all_models")
+    except Exception as exc:   # a plotting problem must not discard a long evaluation
+        print(f"[!] Could not generate the model comparison figures: {exc}")
 
     # ==============================================================================
     # 11. CONFRONTO DIRETTO DEI MODELLI (All Sensors, Lag 19)
