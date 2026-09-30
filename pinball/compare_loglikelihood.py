@@ -1237,29 +1237,29 @@ def main(USE_MU):
     # ==============================================================================
     # 9. CONTEXT GP
     # ==============================================================================
-    print("\nInitializing Context-GP...")
-    gp_in_dim = 6
-    likelihood_gp = gpytorch.likelihoods.GaussianLikelihood().to(device)
-    dummy_x = torch.zeros(2, gp_in_dim).to(device)
-    dummy_y = torch.zeros(2).to(device)
-    model_gp = ContextConditionedGP(dummy_x, dummy_y, likelihood_gp, in_dim=gp_in_dim).to(device)
-    if Path(CHECKPOINT_PATHS["gp"]).exists():
-        state_dict = torch.load(str(CHECKPOINT_PATHS["gp"]), map_location=device)
-        model_gp.load_state_dict(state_dict['model_state_dict'])
-        likelihood_gp.load_state_dict(state_dict['likelihood_state_dict'])
-        print("Loaded GP weights.")
-    model_gp.eval()
-    likelihood_gp.eval()
+    # print("\nInitializing Context-GP...")
+    # gp_in_dim = 6
+    # likelihood_gp = gpytorch.likelihoods.GaussianLikelihood().to(device)
+    # dummy_x = torch.zeros(2, gp_in_dim).to(device)
+    # dummy_y = torch.zeros(2).to(device)
+    # model_gp = ContextConditionedGP(dummy_x, dummy_y, likelihood_gp, in_dim=gp_in_dim).to(device)
+    # if Path(CHECKPOINT_PATHS["gp"]).exists():
+    #     state_dict = torch.load(str(CHECKPOINT_PATHS["gp"]), map_location=device)
+    #     model_gp.load_state_dict(state_dict['model_state_dict'])
+    #     likelihood_gp.load_state_dict(state_dict['likelihood_state_dict'])
+    #     print("Loaded GP weights.")
+    # model_gp.eval()
+    # likelihood_gp.eval()
 
-    gp_dataset = SpatiotemporalDataset(Ytest, MUtest)
+    # gp_dataset = SpatiotemporalDataset(Ytest, MUtest)
 
-    plot_non_mc_batch_diagnostics(
-        model=model_gp, test_dataset=gp_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
-        mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=True,
-        device=device, logs_dir=logs_dir / "logs_gp", color_limits=color_limits,
-        model_name="Context-GP", is_probabilistic=True, model_format="gp",
-        likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std, collector=comparison_data
-    )
+    # plot_non_mc_batch_diagnostics(
+    #     model=model_gp, test_dataset=gp_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
+    #     mesh_coordinates_norm=mesh_coordinates_norm, fixed_sens=fixed_sens, Yh=Yh, USE_MU=True,
+    #     device=device, logs_dir=logs_dir / "logs_gp", color_limits=color_limits,
+    #     model_name="Context-GP", is_probabilistic=True, model_format="gp",
+    #     likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std, collector=comparison_data
+    # )
 
     # ==============================================================================
     # 10. SHRED (DETERMINISTIC)
@@ -1389,18 +1389,18 @@ def main(USE_MU):
     )
     se_dict_cmp["DeepONet"], mse_dict_cmp["DeepONet"] = se, mse
 
-    # Context-Conditioned GP
-    print("  Evaluating Context-GP...")
-    ll, se, sse, mse = evaluate_scenario(
-        model=model_gp, dataset=gp_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
-        mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
-        sensors_to_use=fixed_sens, drop_options=[0], is_mc=False, model_format="gp",
-        likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std, use_mu=True
-    )
-    ll_dict_cmp["Context-GP"] = ll
-    se_dict_cmp["Context-GP"] = se
-    sse_dict_cmp["Context-GP"] = sse
-    mse_dict_cmp["Context-GP"] = mse
+    # # Context-Conditioned GP
+    # print("  Evaluating Context-GP...")
+    # ll, se, sse, mse = evaluate_scenario(
+    #     model=model_gp, dataset=gp_dataset, spatiotemporal_test_collate_fn=unified_test_collate_fn,
+    #     mesh_coordinates_norm=mesh_coordinates_norm, device=device, time_idx=30, lag=max_lag,
+    #     sensors_to_use=fixed_sens, drop_options=[0], is_mc=False, model_format="gp",
+    #     likelihood=likelihood_gp, y_mean=y_mean, y_std=y_std, use_mu=True
+    # )
+    # ll_dict_cmp["Context-GP"] = ll
+    # se_dict_cmp["Context-GP"] = se
+    # sse_dict_cmp["Context-GP"] = sse
+    # mse_dict_cmp["Context-GP"] = mse
 
     # SHRED (Deterministic)
     if 'model_shred' in locals() and model_shred is not None:
