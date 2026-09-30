@@ -338,9 +338,9 @@ def evaluate(
                     x_c, y_c, x_t, y_t = batch[:4]
                     
                     if use_forward_fn:
-                        result = forward_fn(model, (x_c, y_c, x_t, y_t), device)
+                        result = forward_fn(model, (x_c, y_c, x_t), device)
                     else:
-                        result = model(x_c, y_c, x_t, y_t)
+                        result = model(x_c, y_c, x_t)
                     
                     # Unpacking dinamico
                     y_pred_mu, y_pred_var, *latents = result

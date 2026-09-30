@@ -99,6 +99,10 @@ class ELBOLossNP(nn.Module):
         kl_loss = self.kl_divergence_gaussians(
             z_target_mu, z_target_var, z_context_mu, z_context_var
         )
+        
+        B = z_context_mu.shape[0]
+        n_values = y_target.numel() // B
+        kl_loss = kl_loss * z_context_mu.shape[-1] / n_values
 
         param_loss = torch.tensor(0.0, device=y_pred_mu.device)
         if param_mu is not None and theta_true is not None:

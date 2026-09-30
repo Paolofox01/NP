@@ -92,7 +92,16 @@ def fit(model, train_dataset, valid_dataset, batch_size = 64, epochs = 4000, opt
     '''
 
     train_loader = DataLoader(train_dataset, shuffle = True, batch_size = batch_size)
+    train_eval_loader = DataLoader(train_dataset, shuffle = False, batch_size = batch_size)
+    valid_eval_loader = DataLoader(valid_dataset, shuffle = False, batch_size = batch_size)
     optimizer = optim(model.parameters(), lr = lr)
+
+    def batched_loss(loader):
+        preds, targets = [], []
+        for data in loader:
+            preds.append(model(data[0]))
+            targets.append(data[1])
+        return loss_output(torch.cat(targets), torch.cat(preds))
 
     train_error_list = []
     valid_error_list = []
@@ -113,8 +122,8 @@ def fit(model, train_dataset, valid_dataset, batch_size = 64, epochs = 4000, opt
 
         model.eval()
         with torch.no_grad():
-            train_error = loss_output(train_dataset.Y, model(train_dataset.X))
-            valid_error = loss_output(valid_dataset.Y, model(valid_dataset.X))
+            train_error = batched_loss(train_eval_loader)
+            valid_error = batched_loss(valid_eval_loader)
             train_error_list.append(train_error)
             valid_error_list.append(valid_error)
 
@@ -129,8 +138,8 @@ def fit(model, train_dataset, valid_dataset, batch_size = 64, epochs = 4000, opt
 
         if patience_counter == patience:
             model.load_state_dict(best_params)
-            train_error = loss_output(train_dataset.Y, model(train_dataset.X))
-            valid_error = loss_output(valid_dataset.Y, model(valid_dataset.X))
+            train_error = batched_loss(train_eval_loader)
+            valid_error = batched_loss(valid_eval_loader)
             
             if verbose == True:
                 print("Training done: Training loss = " + formatter(train_error) + " \t Validation loss = " + formatter(valid_error))
@@ -138,8 +147,8 @@ def fit(model, train_dataset, valid_dataset, batch_size = 64, epochs = 4000, opt
             return torch.tensor(train_error_list).detach().cpu().numpy(), torch.tensor(valid_error_list).detach().cpu().numpy()
     
     model.load_state_dict(best_params)
-    train_error = loss_output(train_dataset.Y, model(train_dataset.X))
-    valid_error = loss_output(valid_dataset.Y, model(valid_dataset.X))
+    train_error = batched_loss(train_eval_loader)
+    valid_error = batched_loss(valid_eval_loader)
     
     if verbose == True:
     	print("Training done: Training loss = " + formatter(train_error) + " \t Validation loss = " + formatter(valid_error))
@@ -166,17 +175,3 @@ def forecast(forecaster, input_data, steps, nsensors):
         input_data[:,-1, :nsensors] = forecast[i]
 
     return torch.stack(forecast, 1)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
