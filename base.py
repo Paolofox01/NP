@@ -42,7 +42,7 @@ class NPConfig:
     use_fourier: bool = False
     fourier_dims: Optional[int] = None
     num_frequencies: int = 64
-    fourier_scale: float = 10.0
+    fourier_scale: float = 1.0
     learnable_fourier: bool = False
     fourier_include_input: bool = True
 

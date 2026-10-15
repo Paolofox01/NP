@@ -123,9 +123,10 @@ def _build_task(y: Tensor, mu: Tensor, idx: Tensor, coordinates: Tensor, sensors
 
 
 def _random_task(y: Tensor, mu: Tensor, idx: Tensor, coordinates: Tensor, sensors: Tensor,
-                 use_mu: bool) -> Dict[str, Tensor]:
+                 use_mu: bool, target_range: Tuple[int, int] = TARGET_RANGE) -> Dict[str, Tensor]:
     """Random task, shared by the whole batch: dropped sensors, t0, lag and target nodes.
-    Targets are drawn from the nodes that are not active sensors."""
+    Targets: between target_range[0] and target_range[1] (uniform) of the nodes that are
+    not active sensors."""
     device, n_state = coordinates.device, coordinates.shape[0]
     n_drop = DROP_SENSOR_OPTIONS[torch.randint(len(DROP_SENSOR_OPTIONS), ()).item()]
     active = sensors[torch.randperm(len(sensors), device=device)[n_drop:]] if n_drop else sensors
@@ -133,7 +134,7 @@ def _random_task(y: Tensor, mu: Tensor, idx: Tensor, coordinates: Tensor, sensor
     others = torch.ones(n_state, dtype=torch.bool, device=device)
     others[active] = False
     others = others.nonzero().squeeze(1)
-    n_targets = min(int(torch.randint(TARGET_RANGE[0], TARGET_RANGE[1] + 1, ())), len(others))
+    n_targets = min(int(torch.randint(target_range[0], target_range[1] + 1, ())), len(others))
     targets = others[torch.randperm(len(others), device=device)[:n_targets]]
 
     t0 = int(torch.randint(MIN_TIME, y.shape[1] - 1, ()))
@@ -145,10 +146,11 @@ class TrainBatches:
     """Training batches built on the data's device. One epoch = one pass over the training
     trajectories in random order, each batch a random task."""
 
-    def __init__(self, data: PinballData, sensors: Sequence[int], use_mu: bool, batch_size: int = 16):
+    def __init__(self, data: PinballData, sensors: Sequence[int], use_mu: bool, batch_size: int = 16,
+                 target_range: Tuple[int, int] = TARGET_RANGE):
         self.y, self.mu, self.coordinates = data.y["train"], data.mu["train"], data.coordinates
         self.sensors = torch.as_tensor(sensors, device=self.coordinates.device)
-        self.use_mu, self.batch_size = use_mu, batch_size
+        self.use_mu, self.batch_size, self.target_range = use_mu, batch_size, target_range
 
     def __len__(self) -> int:
         return math.ceil(len(self.y) / self.batch_size)
@@ -157,11 +159,12 @@ class TrainBatches:
         order = torch.randperm(len(self.y), device=self.y.device)
         for start in range(0, len(order), self.batch_size):
             yield _random_task(self.y, self.mu, order[start:start + self.batch_size],
-                               self.coordinates, self.sensors, self.use_mu)
+                               self.coordinates, self.sensors, self.use_mu, self.target_range)
 
 
 def make_validation_batches(data: PinballData, sensors: Sequence[int], use_mu: bool,
-                            n_rounds: int = 4, batch_size: int = 16, seed: int = 0) -> List[Dict[str, Tensor]]:
+                            n_rounds: int = 4, batch_size: int = 16, seed: int = 0,
+                            target_range: Tuple[int, int] = TARGET_RANGE) -> List[Dict[str, Tensor]]:
     """A fixed validation set: n_rounds passes over the validation trajectories, with random
     tasks drawn once with `seed`, so every epoch is validated on exactly the same tasks."""
     y, mu, coordinates = data.y["valid"], data.mu["valid"], data.coordinates
@@ -174,7 +177,7 @@ def make_validation_batches(data: PinballData, sensors: Sequence[int], use_mu: b
             order = torch.randperm(len(y), device=y.device)
             for start in range(0, len(order), batch_size):
                 batches.append(_random_task(y, mu, order[start:start + batch_size], coordinates,
-                                            sensors, use_mu))
+                                            sensors, use_mu, target_range))
         return batches
 
 
