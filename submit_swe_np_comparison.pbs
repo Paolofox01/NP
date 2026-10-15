@@ -1,0 +1,111 @@
+#!/bin/bash
+#PBS -N SWE_NP_comparison
+#PBS -q cpu
+#PBS -l select=1:ncpus=8:mem=300gb
+#PBS -l walltime=12:00:00
+
+# Trains LatentNP and AttentiveNP one after the other (swe_np_comparison.ipynb) and saves
+# their parameter counts, training times and metrics to results.json in OUTPUT_DIR.
+# Submit from the project root or from SWE/:  qsub submit_swe_np_comparison.pbs
+
+NOTEBOOK_NAME="swe_np_comparison.ipynb"
+
+# Resolve project directories whether qsub is run from the repo root or SWE/.
+if [ -f "${PBS_O_WORKDIR}/SWE/${NOTEBOOK_NAME}" ]; then
+    PROJECT_ROOT="${PBS_O_WORKDIR}"
+    WORKDIR="${PROJECT_ROOT}/SWE"
+elif [ -f "${PBS_O_WORKDIR}/${NOTEBOOK_NAME}" ]; then
+    WORKDIR="${PBS_O_WORKDIR}"
+    PROJECT_ROOT="$(cd "${PBS_O_WORKDIR}/.." && pwd)"
+else
+    echo "ERROR: Could not locate ${NOTEBOOK_NAME} under ${PBS_O_WORKDIR}"
+    exit 1
+fi
+
+# Folder with base.py, layers.py, LNP.py, ANP.py, loss.py, training.py, swe_data.py
+# (and SWE_sensors_coordinates.pt). Adapt if your model code lives elsewhere.
+CODE_DIR="${WORKDIR}"
+
+# Fast NVMe node-local scratch on gpu02
+DATA_DIR="/scratch_local/u10740203/planetswe"
+OUTPUT_DIR="${WORKDIR}/results_np_comparison"
+CONTAINER="/work/u10740203/fenics_project/my_fenics.sif"
+
+LOGDIR="${WORKDIR}/logs_swe_np_comparison"
+mkdir -p "$LOGDIR" "$DATA_DIR" "$OUTPUT_DIR"
+LOGFILE="${LOGDIR}/swe_np_comparison.log"
+ERRFILE="${LOGDIR}/swe_np_comparison.err"
+
+# Writable caches (matplotlib, temporary files) on node-local scratch.
+NODE_SCRATCH="${PBS_JOBFS:-${TMPDIR:-/tmp}}"
+CACHEDIR="${NODE_SCRATCH}/swe_np_cache_${PBS_JOBID}"
+mkdir -p "${CACHEDIR}/tmp" "${CACHEDIR}/xdg" "${CACHEDIR}/matplotlib"
+
+{
+    echo "====================================================================="
+    echo "Job ID: $PBS_JOBID"
+    echo "Job Name: $PBS_JOBNAME"
+    echo "Queue: $PBS_QUEUE"
+    echo "Node: $(hostname)"
+    echo "Notebook: ${WORKDIR}/${NOTEBOOK_NAME}"
+    echo "Model code: $CODE_DIR"
+    echo "Dataset Directory: $DATA_DIR"
+    echo "Output Directory: $OUTPUT_DIR"
+    echo "Start Time: $(date)"
+    echo "====================================================================="
+
+    if [ ! -f "$CONTAINER" ]; then
+        echo "ERROR: Container not found at $CONTAINER"
+        exit 1
+    fi
+    for file in base.py layers.py LNP.py ANP.py loss.py training.py swe_data.py; do
+        if [ ! -f "${CODE_DIR}/${file}" ]; then
+            echo "ERROR: ${file} not found in ${CODE_DIR} (set CODE_DIR in this script)"
+            exit 1
+        fi
+    done
+
+    nvidia-smi
+
+    # Paths for the notebook (it falls back to its own defaults when these are unset).
+    export APPTAINERENV_NP_CODE_DIR="$CODE_DIR"
+    export APPTAINERENV_SWE_DATA_DIR="$DATA_DIR"
+    export APPTAINERENV_SWE_OUTPUT_DIR="$OUTPUT_DIR"
+
+    export APPTAINERENV_PYTHONUNBUFFERED=1         # progress reaches the log immediately
+    export APPTAINERENV_MPLBACKEND=Agg             # no display: figures are only saved
+    export APPTAINERENV_TQDM_DISABLE=1             # no progress bars in the log files
+    export APPTAINERENV_TMPDIR="${CACHEDIR}/tmp"
+    export APPTAINERENV_XDG_CACHE_HOME="${CACHEDIR}/xdg"
+    export APPTAINERENV_MPLCONFIGDIR="${CACHEDIR}/matplotlib"
+    export APPTAINER_BINDPATH="${PROJECT_ROOT}:${PROJECT_ROOT},${CODE_DIR}:${CODE_DIR},/scratch_local:/scratch_local,${CACHEDIR}:${CACHEDIR}"
+
+    # Run the notebook's code cells as a script, from the notebook's folder (so its relative
+    # paths behave as in Jupyter). No Jupyter needed in the container, and training progress
+    # is written to the log as it happens. The extracted script is kept next to the logs.
+    SCRIPT="${LOGDIR}/swe_np_comparison_${PBS_JOBID%%.*}.py"
+    cd "$WORKDIR" || { echo "ERROR: Failed to cd to $WORKDIR"; exit 1; }
+    apptainer exec --nv "$CONTAINER" python3 - "$NOTEBOOK_NAME" "$SCRIPT" <<'EOF'
+import json, sys
+notebook, script = sys.argv[1], sys.argv[2]
+cells = json.load(open(notebook, encoding="utf-8"))["cells"]
+code = ["".join(cell["source"]) for cell in cells if cell["cell_type"] == "code"]
+with open(script, "w", encoding="utf-8") as f:
+    f.write("\n\n".join(code) + "\n")
+print(f"Extracted {len(code)} code cells to {script}")
+EOF
+    apptainer exec --nv "$CONTAINER" python3 -u "$SCRIPT"
+    EXIT_CODE=$?
+
+    echo ""
+    echo "====================================================================="
+    echo "TRAINING FINISHED"
+    echo "Exit code: $EXIT_CODE"
+    echo "Results: ${OUTPUT_DIR}/results.json"
+    echo "End Time: $(date)"
+    echo "====================================================================="
+
+    rm -rf "$CACHEDIR"
+    exit $EXIT_CODE
+
+} > "$LOGFILE" 2> "$ERRFILE"
