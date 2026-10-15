@@ -9,20 +9,21 @@ x = ([mu,] relative time, x, y): relative time (t - t0) / ntimes, so 0 at t0 and
 mu (the 3 flow parameters) only when use_mu=True.
 y = the state value, standardized with the training-set mean and std.
 
-Batches are the dictionaries training.py expects.
+Batches are the dictionaries training.py expects. The whole dataset is small (about 350 MB of
+training data), so it is kept on the GPU and batches are built there directly: no loader workers
+and no copies between CPU and GPU (call data.to(device) once).
 """
 
-from dataclasses import dataclass
-from functools import partial
+import math
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Sequence, Tuple
 
 import numpy as np
 import torch
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
 
-__all__ = ["PinballData", "load_pinball", "x_bounds", "make_train_loader",
+__all__ = ["PinballData", "load_pinball", "x_bounds", "TrainBatches",
            "make_validation_batches", "make_test_batch", "LAG_OPTIONS"]
 
 N_TRAJECTORIES = 500
@@ -42,6 +43,12 @@ class PinballData:
     y_mean: float
     y_std: float
     n_times: int = N_TIMES
+
+    def to(self, device) -> "PinballData":
+        """The same data, with every tensor moved to `device`."""
+        return replace(self, coordinates=self.coordinates.to(device),
+                       y={k: v.to(device) for k, v in self.y.items()},
+                       mu={k: v.to(device) for k, v in self.mu.items()})
 
 
 # ----------------------------------------------------------------------------- loading
@@ -87,96 +94,95 @@ def x_bounds(data: PinballData, use_mu: bool) -> Tuple[List[float], List[float]]
 
 # ----------------------------------------------------------------------------- tasks
 
-class _Trajectories(Dataset):
-    def __init__(self, y: Tensor, mu: Tensor):
-        self.y, self.mu = y, mu
+def _build_task(y: Tensor, mu: Tensor, idx: Tensor, coordinates: Tensor, sensors: Tensor,
+                use_mu: bool, t0: int, lag: int, targets: Tensor) -> Dict[str, Tensor]:
+    """Context = sensors over t0 - lag ... t0; targets = given nodes at t0.
 
-    def __len__(self) -> int:
-        return len(self.y)
-
-    def __getitem__(self, i: int) -> Tuple[Tensor, Tensor]:
-        return self.y[i], self.mu[i]
-
-
-def _build_task(items, coordinates: Tensor, sensors: Tensor, use_mu: bool, t0: int, lag: int,
-                targets: Tensor) -> Dict[str, Tensor]:
-    """Context = sensors over t0 - lag ... t0; targets = given nodes at t0."""
-    y = torch.stack([item[0] for item in items])               # (B, ntimes, nstate)
-    mu = torch.stack([item[1] for item in items])              # (B, nparams)
-    B, n_times = y.shape[:2]
-
-    times = torch.arange(t0 - lag, t0 + 1).repeat_interleave(len(sensors))   # (N,)
-    points = sensors.repeat(lag + 1)                                          # (N,)
+    y, mu: one split; idx: the trajectories of the batch. Everything stays on y's device.
+    """
+    device, n_times = y.device, y.shape[1]
+    B = len(idx)
+    times = torch.arange(t0 - lag, t0 + 1, device=device).repeat_interleave(len(sensors))  # (N,)
+    points = sensors.repeat(lag + 1)                                                        # (N,)
     time_c = ((times - t0).float() / n_times).unsqueeze(-1)
 
     x_context = torch.cat([time_c, coordinates[points]], dim=-1).expand(B, -1, -1)
-    x_target = torch.cat([torch.zeros(len(targets), 1), coordinates[targets]], dim=-1).expand(B, -1, -1)
+    x_target = torch.cat([torch.zeros(len(targets), 1, device=device), coordinates[targets]],
+                         dim=-1).expand(B, -1, -1)
     if use_mu:
-        x_context = torch.cat([mu.unsqueeze(1).expand(-1, x_context.shape[1], -1), x_context], dim=-1)
-        x_target = torch.cat([mu.unsqueeze(1).expand(-1, x_target.shape[1], -1), x_target], dim=-1)
+        mu_b = mu[idx].unsqueeze(1)
+        x_context = torch.cat([mu_b.expand(-1, x_context.shape[1], -1), x_context], dim=-1)
+        x_target = torch.cat([mu_b.expand(-1, x_target.shape[1], -1), x_target], dim=-1)
+    rows = idx.unsqueeze(1)
     return {
         "x_context": x_context.contiguous(),
-        "y_context": y[:, times, points].unsqueeze(-1),
+        "y_context": y[rows, times.unsqueeze(0), points.unsqueeze(0)].unsqueeze(-1),
         "x_target": x_target.contiguous(),
-        "y_target": y[:, t0, targets].unsqueeze(-1),
+        "y_target": y[rows, t0, targets.unsqueeze(0)].unsqueeze(-1),
     }
 
 
-def _collate_train(items, coordinates: Tensor, sensors: Tensor, use_mu: bool) -> Dict[str, Tensor]:
+def _random_task(y: Tensor, mu: Tensor, idx: Tensor, coordinates: Tensor, sensors: Tensor,
+                 use_mu: bool) -> Dict[str, Tensor]:
     """Random task, shared by the whole batch: dropped sensors, t0, lag and target nodes.
     Targets are drawn from the nodes that are not active sensors."""
-    n_state = coordinates.shape[0]
+    device, n_state = coordinates.device, coordinates.shape[0]
     n_drop = DROP_SENSOR_OPTIONS[torch.randint(len(DROP_SENSOR_OPTIONS), ()).item()]
-    active = sensors[torch.randperm(len(sensors))[n_drop:]] if n_drop else sensors
+    active = sensors[torch.randperm(len(sensors), device=device)[n_drop:]] if n_drop else sensors
 
-    others = torch.ones(n_state, dtype=torch.bool)
+    others = torch.ones(n_state, dtype=torch.bool, device=device)
     others[active] = False
     others = others.nonzero().squeeze(1)
     n_targets = min(int(torch.randint(TARGET_RANGE[0], TARGET_RANGE[1] + 1, ())), len(others))
-    targets = others[torch.randperm(len(others))[:n_targets]]
+    targets = others[torch.randperm(len(others), device=device)[:n_targets]]
 
-    n_times = items[0][0].shape[0]
-    t0 = int(torch.randint(MIN_TIME, n_times - 1, ()))
+    t0 = int(torch.randint(MIN_TIME, y.shape[1] - 1, ()))
     lag = LAG_OPTIONS[torch.randint(len(LAG_OPTIONS), ()).item()]
-    return _build_task(items, coordinates, active, use_mu, t0, lag, targets)
+    return _build_task(y, mu, idx, coordinates, active, use_mu, t0, lag, targets)
 
 
-def make_train_loader(data: PinballData, sensors: Sequence[int], use_mu: bool,
-                      batch_size: int = 16, num_workers: int = 4) -> DataLoader:
-    """One epoch = one pass over the training trajectories, each batch a random task."""
-    return DataLoader(
-        _Trajectories(data.y["train"], data.mu["train"]), batch_size=batch_size, shuffle=True,
-        collate_fn=partial(_collate_train, coordinates=data.coordinates,
-                           sensors=torch.as_tensor(sensors), use_mu=use_mu),
-        num_workers=num_workers, pin_memory=torch.cuda.is_available(),
-        persistent_workers=num_workers > 0,
-    )
+class TrainBatches:
+    """Training batches built on the data's device. One epoch = one pass over the training
+    trajectories in random order, each batch a random task."""
+
+    def __init__(self, data: PinballData, sensors: Sequence[int], use_mu: bool, batch_size: int = 16):
+        self.y, self.mu, self.coordinates = data.y["train"], data.mu["train"], data.coordinates
+        self.sensors = torch.as_tensor(sensors, device=self.coordinates.device)
+        self.use_mu, self.batch_size = use_mu, batch_size
+
+    def __len__(self) -> int:
+        return math.ceil(len(self.y) / self.batch_size)
+
+    def __iter__(self) -> Iterator[Dict[str, Tensor]]:
+        order = torch.randperm(len(self.y), device=self.y.device)
+        for start in range(0, len(order), self.batch_size):
+            yield _random_task(self.y, self.mu, order[start:start + self.batch_size],
+                               self.coordinates, self.sensors, self.use_mu)
 
 
 def make_validation_batches(data: PinballData, sensors: Sequence[int], use_mu: bool,
                             n_rounds: int = 4, batch_size: int = 16, seed: int = 0) -> List[Dict[str, Tensor]]:
     """A fixed validation set: n_rounds passes over the validation trajectories, with random
     tasks drawn once with `seed`, so every epoch is validated on exactly the same tasks."""
-    dataset = _Trajectories(data.y["valid"], data.mu["valid"])
-    collate = partial(_collate_train, coordinates=data.coordinates,
-                      sensors=torch.as_tensor(sensors), use_mu=use_mu)
-    state = torch.get_rng_state()
-    torch.manual_seed(seed)
-    try:
+    y, mu, coordinates = data.y["valid"], data.mu["valid"], data.coordinates
+    sensors = torch.as_tensor(sensors, device=coordinates.device)
+    devices = [y.device] if y.device.type == "cuda" else []
+    with torch.random.fork_rng(devices=devices):  # leaves the training random state untouched
+        torch.manual_seed(seed)
         batches = []
         for _ in range(n_rounds):
-            order = torch.randperm(len(dataset)).tolist()
+            order = torch.randperm(len(y), device=y.device)
             for start in range(0, len(order), batch_size):
-                batches.append(collate([dataset[i] for i in order[start:start + batch_size]]))
+                batches.append(_random_task(y, mu, order[start:start + batch_size], coordinates,
+                                            sensors, use_mu))
         return batches
-    finally:
-        torch.set_rng_state(state)
 
 
 def make_test_batch(data: PinballData, indices: Sequence[int], sensors: Sequence[int], use_mu: bool,
                     t0: int, lag: int, split: str = "test") -> Dict[str, Tensor]:
     """Given trajectories, sensors, t0 and lag; every mesh node is a target (for evaluation and
     plots of the full field: the posterior is not used at test time)."""
-    items = [(data.y[split][i], data.mu[split][i]) for i in indices]
-    return _build_task(items, data.coordinates, torch.as_tensor(sensors), use_mu, t0, lag,
-                       torch.arange(data.coordinates.shape[0]))
+    device = data.coordinates.device
+    return _build_task(data.y[split], data.mu[split], torch.as_tensor(indices, device=device),
+                       data.coordinates, torch.as_tensor(sensors, device=device), use_mu, t0, lag,
+                       torch.arange(data.coordinates.shape[0], device=device))

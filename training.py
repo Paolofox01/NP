@@ -106,6 +106,7 @@ def train(
     epochs: int,
     device: torch.device,
     val_loader: Optional[DataLoader] = None,
+    validate_every: int = 1,
     scheduler=None,
     warmup_epochs: int = 0,
     kl_schedule: Optional[Sequence[float]] = None,
@@ -120,6 +121,9 @@ def train(
     """Train with the negative ELBO; validate on the predictive NLL.
 
     Args:
+        validate_every: Validate every this many epochs (and always after the last one).
+            A ReduceLROnPlateau scheduler is stepped at each validation, so its patience
+            counts validations; early_stopping_patience still counts epochs.
         warmup_epochs: Epochs during which a ReduceLROnPlateau scheduler is not stepped and
             early stopping / best-model tracking is off (early losses are not representative).
             Usually the length of the KL schedule.
@@ -131,12 +135,15 @@ def train(
         use_amp: bfloat16 mixed precision (CUDA only).
 
     The model ends with the weights of the best validation epoch, if there is a validation set.
-    Returns the history: one value per epoch for each logged quantity.
+    Returns the history: one value per epoch for the training quantities; val_nll and val_mse
+    have one value per validation, at the epochs (1-based) listed in val_epoch.
     """
+    if validate_every < 1:
+        raise ValueError("validate_every must be >= 1")
     history: Dict[str, List[float]] = {key: [] for key in (
-        "train_loss", "train_nll", "train_kl", "kl_weight", "lr", "val_nll", "val_mse")}
+        "train_loss", "train_nll", "train_kl", "kl_weight", "lr", "val_epoch", "val_nll", "val_mse")}
     plateau = isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau)
-    best_nll, best_state, epochs_without_improvement = float("inf"), None, 0
+    best_nll, best_state, best_epoch = float("inf"), None, None
     if checkpoint_dir:
         checkpoint_dir = Path(checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -174,36 +181,39 @@ def train(
 
         # --- validation, best model, early stopping -----------------------------
         stop = False
-        if val_loader is not None:
+        validated = val_loader is not None and ((epoch + 1) % validate_every == 0 or epoch == epochs - 1)
+        if validated:
             metrics = evaluate(model, val_loader, device, num_samples, use_amp)
+            history["val_epoch"].append(epoch + 1)
             history["val_nll"].append(metrics["nll"])
             history["val_mse"].append(metrics["mse"])
 
             if epoch >= warmup_epochs:
                 if metrics["nll"] < best_nll:
-                    best_nll, epochs_without_improvement = metrics["nll"], 0
+                    best_nll, best_epoch = metrics["nll"], epoch
                     best_state = copy.deepcopy(model.state_dict())
                     if checkpoint_dir:
                         save_checkpoint(checkpoint_dir / "best_model.pt", model, optimizer, epoch, history)
-                else:
-                    epochs_without_improvement += 1
-                stop = (early_stopping_patience is not None
-                        and epochs_without_improvement >= early_stopping_patience)
+                # counted in epochs, from the best epoch or the end of the warmup
+                since = epoch - (best_epoch if best_epoch is not None else warmup_epochs - 1)
+                stop = early_stopping_patience is not None and since >= early_stopping_patience
 
         # --- learning rate ------------------------------------------------------
         if scheduler is not None:
             if not plateau:
                 scheduler.step()
             elif epoch >= warmup_epochs:
-                scheduler.step(history["val_nll"][-1] if val_loader is not None
-                               else history["train_loss"][-1])
+                if validated:
+                    scheduler.step(history["val_nll"][-1])
+                elif val_loader is None:
+                    scheduler.step(history["train_loss"][-1])
 
         # --- report -------------------------------------------------------------
         if verbose and (epoch == 0 or (epoch + 1) % print_every == 0 or epoch == epochs - 1 or stop):
             message = (f"Epoch {epoch + 1}/{epochs}  loss {history['train_loss'][-1]:.4f} "
                        f"(nll {history['train_nll'][-1]:.4f}, kl {history['train_kl'][-1]:.4f}, "
                        f"β={kl_weight:.3f})")
-            if val_loader is not None:
+            if validated:
                 message += f"  |  val nll {history['val_nll'][-1]:.4f}, mse {history['val_mse'][-1]:.4f}"
             message += f"  |  lr {history['lr'][-1]:.2e}"
             print(message)
@@ -218,5 +228,5 @@ def train(
     if best_state is not None:
         model.load_state_dict(best_state)
         if verbose:
-            print(f"Restored the best model (val nll {best_nll:.4f})")
+            print(f"Restored the best model (epoch {best_epoch + 1}, val nll {best_nll:.4f})")
     return history
