@@ -54,6 +54,7 @@ class NPConfig:
     init_var: float = 0.1
 
     # Latent variable
+    posterior_max_targets: Optional[int] = None
     min_latent_var: float = 1e-4
 
     # Attention (AttentiveNP only)
@@ -294,6 +295,11 @@ class NeuralProcess(nn.Module, ABC):
     def _posterior(self, ex_c: Tensor, y_c: Tensor, mask_c: Mask,
                    ex_t: Tensor, y_t: Tensor, mask_t: Mask) -> Normal:
         """q(z | context ∪ target)."""
+        k = self.cfg.posterior_max_targets               # e.g. 512; None = use all targets
+        if k is not None and ex_t.shape[1] > k:
+            keep = torch.randperm(ex_t.shape[1], device=ex_t.device)[:k]
+            ex_t, y_t = ex_t[:, keep], y_t[:, keep]
+            mask_t = mask_t[:, keep] if mask_t is not None else None
         if self.cfg.target_includes_context:
             ex, y, mask = ex_t, y_t, mask_t
         else:
