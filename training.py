@@ -40,13 +40,15 @@ def _to_device(batch: Batch, device: torch.device) -> Batch:
     return {key: value.to(device, non_blocking=True) for key, value in batch.items()}
 
 
-def _forward(model: NeuralProcess, batch: Batch, num_samples: int, with_target: bool) -> NPOutput:
+def _forward(model: NeuralProcess, batch: Batch, num_samples: int, with_target: bool,
+             use_posterior: Optional[bool] = None) -> NPOutput:
     return model(
         batch["x_context"], batch["y_context"], batch["x_target"],
         batch["y_target"] if with_target else None,
         num_samples=num_samples,
         context_mask=batch.get("context_mask"),
         target_mask=batch.get("target_mask"),
+        use_posterior=use_posterior,
     )
 
 
@@ -60,17 +62,30 @@ def _autocast(device: torch.device, use_amp: bool):
 
 @torch.no_grad()
 def evaluate(model: NeuralProcess, loader: DataLoader, device: torch.device,
-             num_samples: int = 1, use_amp: bool = False) -> Dict[str, float]:
-    """Predictive NLL and MSE per value on the targets, predicting from the context only."""
+             num_samples: int = 1, use_amp: bool = False, elbo: bool = False) -> Dict[str, float]:
+    """Metrics per value on the targets.
+
+    nll, mse: predictions from the context only (prior), as at test time.
+    With elbo=True also: elbo (the negative ELBO with KL weight 1), elbo_nll and kl,
+    from a second pass with z sampled from the posterior q(z | C ∪ T), as in training.
+    """
     model.eval()
-    totals = {"nll": 0.0, "mse": 0.0}
+    names = ("nll", "mse") + (("elbo", "elbo_nll", "kl") if elbo else ())
+    totals = dict.fromkeys(names, 0.0)
     for batch in loader:
         batch = _to_device(batch, device)
+        mask = batch.get("target_mask")
         with _autocast(device, use_amp):
             out = _forward(model, batch, num_samples, with_target=False)
-        mask = batch.get("target_mask")
         totals["nll"] += gaussian_nll(out.y, batch["y_target"], mask).item()
         totals["mse"] += masked_mse(out.y, batch["y_target"], mask).item()
+        if elbo:
+            with _autocast(device, use_amp):
+                out = _forward(model, batch, num_samples, with_target=True, use_posterior=True)
+            terms = np_loss(out, batch["y_target"], mask, kl_weight=1.0)
+            totals["elbo"] += terms.total.item()
+            totals["elbo_nll"] += terms.nll.item()
+            totals["kl"] += terms.kl.item()
     return {name: total / len(loader) for name, total in totals.items()}
 
 
@@ -107,6 +122,7 @@ def train(
     device: torch.device,
     val_loader: Optional[DataLoader] = None,
     validate_every: int = 1,
+    monitor: str = "nll",
     scheduler=None,
     warmup_epochs: int = 0,
     kl_schedule: Optional[Sequence[float]] = None,
@@ -124,6 +140,10 @@ def train(
         validate_every: Validate every this many epochs (and always after the last one).
             A ReduceLROnPlateau scheduler is stepped at each validation, so its patience
             counts validations; early_stopping_patience still counts epochs.
+        monitor: Validation quantity for the best model, early stopping and ReduceLROnPlateau:
+            "nll" = predictive NLL from the context only (what the model does at test time);
+            "elbo" = negative ELBO with KL weight 1 (the training objective, posterior included).
+            Both are recorded either way when monitor="elbo" (val_elbo, val_elbo_nll, val_kl).
         warmup_epochs: Epochs during which a ReduceLROnPlateau scheduler is not stepped and
             early stopping / best-model tracking is off (early losses are not representative).
             Usually the length of the KL schedule.
@@ -140,10 +160,15 @@ def train(
     """
     if validate_every < 1:
         raise ValueError("validate_every must be >= 1")
+    if monitor not in ("nll", "elbo"):
+        raise ValueError(f"monitor must be 'nll' or 'elbo', got {monitor!r}")
+    use_elbo = monitor == "elbo"
+    val_keys = ("nll", "mse") + (("elbo", "elbo_nll", "kl") if use_elbo else ())
     history: Dict[str, List[float]] = {key: [] for key in (
-        "train_loss", "train_nll", "train_kl", "kl_weight", "lr", "val_epoch", "val_nll", "val_mse")}
+        "train_loss", "train_nll", "train_kl", "kl_weight", "lr", "val_epoch",
+        *(f"val_{name}" for name in val_keys))}
     plateau = isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau)
-    best_nll, best_state, best_epoch = float("inf"), None, None
+    best_value, best_state, best_epoch = float("inf"), None, None
     if checkpoint_dir:
         checkpoint_dir = Path(checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -183,14 +208,14 @@ def train(
         stop = False
         validated = val_loader is not None and ((epoch + 1) % validate_every == 0 or epoch == epochs - 1)
         if validated:
-            metrics = evaluate(model, val_loader, device, num_samples, use_amp)
+            metrics = evaluate(model, val_loader, device, num_samples, use_amp, elbo=use_elbo)
             history["val_epoch"].append(epoch + 1)
-            history["val_nll"].append(metrics["nll"])
-            history["val_mse"].append(metrics["mse"])
+            for name in val_keys:
+                history[f"val_{name}"].append(metrics[name])
 
             if epoch >= warmup_epochs:
-                if metrics["nll"] < best_nll:
-                    best_nll, best_epoch = metrics["nll"], epoch
+                if metrics[monitor] < best_value:
+                    best_value, best_epoch = metrics[monitor], epoch
                     best_state = copy.deepcopy(model.state_dict())
                     if checkpoint_dir:
                         save_checkpoint(checkpoint_dir / "best_model.pt", model, optimizer, epoch, history)
@@ -204,7 +229,7 @@ def train(
                 scheduler.step()
             elif epoch >= warmup_epochs:
                 if validated:
-                    scheduler.step(history["val_nll"][-1])
+                    scheduler.step(history[f"val_{monitor}"][-1])
                 elif val_loader is None:
                     scheduler.step(history["train_loss"][-1])
 
@@ -215,6 +240,8 @@ def train(
                        f"β={kl_weight:.3f})")
             if validated:
                 message += f"  |  val nll {history['val_nll'][-1]:.4f}, mse {history['val_mse'][-1]:.4f}"
+                if use_elbo:
+                    message += f", elbo {history['val_elbo'][-1]:.4f} (kl {history['val_kl'][-1]:.4f})"
             message += f"  |  lr {history['lr'][-1]:.2e}"
             print(message)
 
@@ -228,5 +255,5 @@ def train(
     if best_state is not None:
         model.load_state_dict(best_state)
         if verbose:
-            print(f"Restored the best model (epoch {best_epoch + 1}, val nll {best_nll:.4f})")
+            print(f"Restored the best model (epoch {best_epoch + 1}, val {monitor} {best_value:.4f})")
     return history
