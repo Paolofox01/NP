@@ -6,14 +6,14 @@
 
 # Trains LatentNP and AttentiveNP one after the other (swe_np_comparison.ipynb) and saves
 # their parameter counts, training times and metrics to results.json in OUTPUT_DIR.
-# Submit from the project root or from SWE/:  qsub submit_swe_np_comparison.pbs
+# Submit from the project root or from swe/:  qsub swe/submit_swe_np_comparison.pbs
 
 NOTEBOOK_NAME="swe_np_comparison.ipynb"
 
-# Resolve project directories whether qsub is run from the repo root or SWE/.
-if [ -f "${PBS_O_WORKDIR}/SWE/${NOTEBOOK_NAME}" ]; then
+# Resolve project directories whether qsub is run from the project root or swe/.
+if [ -f "${PBS_O_WORKDIR}/swe/${NOTEBOOK_NAME}" ]; then
     PROJECT_ROOT="${PBS_O_WORKDIR}"
-    WORKDIR="${PROJECT_ROOT}/SWE"
+    WORKDIR="${PROJECT_ROOT}/swe"
 elif [ -f "${PBS_O_WORKDIR}/${NOTEBOOK_NAME}" ]; then
     WORKDIR="${PBS_O_WORKDIR}"
     PROJECT_ROOT="$(cd "${PBS_O_WORKDIR}/.." && pwd)"
@@ -22,9 +22,9 @@ else
     exit 1
 fi
 
-# Folder with base.py, layers.py, LNP.py, ANP.py, loss.py, training.py, swe_data.py
-# (and SWE_sensors_coordinates.pt). Adapt if your model code lives elsewhere.
-CODE_DIR="${WORKDIR}"
+# Project folder with models/, layers/ and training/ (swe_data.py and SWE_sensors_coordinates.pt
+# are next to the notebook, in WORKDIR).
+CODE_DIR="${PROJECT_ROOT}"
 
 # Fast NVMe node-local scratch on gpu02
 DATA_DIR="/scratch_local/u10740203/planetswe"
@@ -58,7 +58,7 @@ mkdir -p "${CACHEDIR}/tmp" "${CACHEDIR}/xdg" "${CACHEDIR}/matplotlib"
         echo "ERROR: Container not found at $CONTAINER"
         exit 1
     fi
-    for file in base.py layers.py LNP.py ANP.py loss.py training.py swe_data.py; do
+    for file in models/__init__.py layers/__init__.py training/__init__.py swe/swe_data.py; do
         if [ ! -f "${CODE_DIR}/${file}" ]; then
             echo "ERROR: ${file} not found in ${CODE_DIR} (set CODE_DIR in this script)"
             exit 1
@@ -78,7 +78,7 @@ mkdir -p "${CACHEDIR}/tmp" "${CACHEDIR}/xdg" "${CACHEDIR}/matplotlib"
     export APPTAINERENV_TMPDIR="${CACHEDIR}/tmp"
     export APPTAINERENV_XDG_CACHE_HOME="${CACHEDIR}/xdg"
     export APPTAINERENV_MPLCONFIGDIR="${CACHEDIR}/matplotlib"
-    export APPTAINER_BINDPATH="${PROJECT_ROOT}:${PROJECT_ROOT},${CODE_DIR}:${CODE_DIR},/scratch_local:/scratch_local,${CACHEDIR}:${CACHEDIR}"
+    export APPTAINER_BINDPATH="${PROJECT_ROOT}:${PROJECT_ROOT},/scratch_local:/scratch_local,${CACHEDIR}:${CACHEDIR}"
 
     # Run the notebook's code cells as a script, from the notebook's folder (so its relative
     # paths behave as in Jupyter). No Jupyter needed in the container, and training progress

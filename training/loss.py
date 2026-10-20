@@ -9,7 +9,7 @@ import torch
 from torch import Tensor
 from torch.distributions import Normal, kl_divergence
 
-from base import Mask, NPOutput
+from models.base import Mask, NPOutput
 
 __all__ = ["LossTerms", "np_loss", "gaussian_nll", "masked_mse"]
 
@@ -20,7 +20,7 @@ class LossTerms:
 
     total: Tensor  # nll + kl_weight * kl
     nll: Tensor    # -E_z log p(y_target | z), per value
-    kl: Tensor     # KL(q(z | C ∪ T) || q(z | C)), per value
+    kl: Tensor     # KL(q(z | C ∪ T) || q(z | C)), per value; 0 for a model without a latent
 
 
 def _float32(dist: Normal) -> Normal:
@@ -45,9 +45,10 @@ def np_loss(
     """Negative ELBO, normalized per predicted value.
 
     For each task:  [ -Σ log p(y_t | z)  +  kl_weight * KL(q(z | C ∪ T) || q(z | C)) ] / n_values
-    then averaged over the batch. The model must have been called with y_target.
+    then averaged over the batch. A latent model must have been called with y_target.
+    Without a latent (conditional NP) there is no KL: the loss is the NLL alone.
     """
-    if out.z_posterior is None:
+    if out.z_prior is not None and out.z_posterior is None:
         raise ValueError("np_loss needs the posterior: call the model with y_target")
 
     log_lik = _float32(out.y).log_prob(y_target.float().unsqueeze(0)).mean(0).sum(-1)  # (B, T)
@@ -56,7 +57,10 @@ def np_loss(
     n_values = _values_per_task(target_mask, y_target.shape).to(log_lik.device)
 
     nll = (-log_lik.sum(-1) / n_values).mean()
-    kl = (kl_divergence(_float32(out.z_posterior), _float32(out.z_prior)).sum(-1) / n_values).mean()
+    if out.z_prior is None:
+        kl = nll.new_zeros(())
+    else:
+        kl = (kl_divergence(_float32(out.z_posterior), _float32(out.z_prior)).sum(-1) / n_values).mean()
     return LossTerms(nll + kl_weight * kl, nll, kl)
 
 

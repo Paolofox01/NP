@@ -3,7 +3,7 @@
 from torch import Tensor
 
 from layers import MLP
-from base import Mask, NeuralProcess, NPConfig, masked_mean
+from models.base import Mask, NeuralProcess, NPConfig, masked_mean
 
 __all__ = ["LatentNP"]
 

@@ -16,8 +16,8 @@ import torch.nn as nn
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-from base import NeuralProcess, NPConfig, NPOutput
-from loss import gaussian_nll, masked_mse, np_loss
+from models.base import NeuralProcess, NPConfig, NPOutput
+from training.loss import gaussian_nll, masked_mse, np_loss
 
 try:
     from tqdm import tqdm

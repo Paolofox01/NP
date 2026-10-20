@@ -1,9 +1,13 @@
-"""Parts shared by every latent Neural Process model."""
+"""Parts shared by every Neural Process model.
+
+With use_latent=True (default) the models are latent NPs (a global z, trained on the ELBO);
+with use_latent=False they are conditional NPs (no z, trained on the likelihood alone).
+"""
 
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Sequence, Type, Union
+from typing import Optional, Sequence, Tuple, Type, Union
 
 import torch
 import torch.nn as nn
@@ -54,12 +58,19 @@ class NPConfig:
     init_var: float = 0.1
 
     # Latent variable
+    use_latent: bool = True            # False: conditional NP (no z; loss = NLL only)
     posterior_max_targets: Optional[int] = None
     min_latent_var: float = 1e-4
 
-    # Attention (AttentiveNP only)
+    # Attention (AttentiveNP, TNP, SenseiverNP)
     num_heads: int = 8
-    n_self_attention: int = 1          # self-attention layers in the encoder
+    n_self_attention: int = 1          # AttentiveNP: self-attention layers in the encoder
+
+    # Transformer models (TNP, SenseiverNP)
+    n_blocks: int = 2                  # Transformer blocks (attention + feed-forward)
+    ffn_multiplier: int = 2            # feed-forward hidden width = ffn_multiplier * r_dim
+    n_inducing_points: Optional[int] = None  # TNP: ISAB blocks with this many inducing points
+    n_latents: int = 32                # SenseiverNP: size of the learned latent array
 
     # Extras
     target_includes_context: bool = True  # are the context points also in the target set?
@@ -70,8 +81,8 @@ class NPOutput:
     """What every model returns, in every mode. S = samples, B = batch, T = target points."""
 
     y: Normal                          # predictive distribution, (S, B, T, y_dim)
-    z_prior: Normal                    # q(z | context), (B, z_dim)
-    z_posterior: Optional[Normal]      # q(z | context ∪ target), None if no y_target
+    z_prior: Optional[Normal]          # q(z | context), (B, z_dim); None without a latent
+    z_posterior: Optional[Normal]      # q(z | context ∪ target); None without y_target or a latent
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -212,16 +223,19 @@ class LatentEncoder(nn.Module):
 # ----------------------------------------------------------------------------- base model
 
 class NeuralProcess(nn.Module, ABC):
-    """Latent Neural Process skeleton.
+    """Neural Process skeleton.
 
     Pipeline (x is given in physical units and scaled to [-1, 1] first):
         x                       -> x_encoder           -> e(x)  (B, N, r_dim)
         (e(x), y) per point     -> encode_points       -> s_i   (B, N, r_dim)
-        mean of s_i             -> latent encoder      -> q(z)
-        context, e(x_target)    -> deterministic_path  -> r     (B, T, r_dim)
-        [z, r, e(x_t), x_t]     -> decoder             -> p(y)
+        context points          -> summarize           -> the context representation
+        pool(summary)           -> latent encoder      -> q(z)       (only with use_latent)
+        summary, e(x_target)    -> deterministic_path  -> r     (B, T, r_dim)
+        [z, r, e(x_t), x_t]     -> decoder             -> p(y)       (no z without use_latent)
 
-    Subclasses implement `deterministic_path` and may extend `encode_points`.
+    Subclasses implement `deterministic_path` and may extend `encode_points`, or replace
+    `summarize` / `pool` when the context representation is not one vector per point
+    (e.g. a set of learned latents, or one set per Transformer block).
     """
 
     def __init__(self, cfg: NPConfig):
@@ -233,9 +247,10 @@ class NeuralProcess(nn.Module, ABC):
         self.x_encoder = XEncoder(cfg)
         self.y_embed = nn.Linear(cfg.y_dim, cfg.r_dim)  # so y is not drowned out by e(x)
         self.xy_encoder = MLP(2 * cfg.r_dim, cfg.r_dim, n_hidden=cfg.n_hidden, **mlp_kwargs)
-        self.latent_encoder = LatentEncoder(cfg)
+        self.latent_encoder = LatentEncoder(cfg) if cfg.use_latent else None
         self.decoder = GaussianDecoder(
-            cfg.z_dim + 2 * cfg.r_dim + cfg.x_dim, cfg.y_dim, output_groups=cfg.output_groups,
+            (cfg.z_dim if cfg.use_latent else 0) + 2 * cfg.r_dim + cfg.x_dim, cfg.y_dim,
+            output_groups=cfg.output_groups,
             n_hidden=cfg.n_decoder_hidden, n_group_hidden=cfg.n_group_hidden,
             dropout=cfg.dropout, min_var=cfg.min_var, init_var=cfg.init_var, **mlp_kwargs,
         )
@@ -246,10 +261,20 @@ class NeuralProcess(nn.Module, ABC):
         """Per-point representations of (e(x), y) pairs: (B, N, r_dim)."""
         return self.xy_encoder(torch.cat([ex, self.y_embed(y)], dim=-1))
 
+    def summarize(self, ex: Tensor, y: Tensor, mask: Mask = None) -> Tuple[Tensor, Mask]:
+        """Representation of a point set and its padding mask. Default: one vector per point."""
+        return self.encode_points(ex, y, mask), mask
+
+    def pool(self, summary: Tensor, mask: Mask = None) -> Tensor:
+        """Summary -> one vector (B, r_dim), the input of the latent encoder. Default: the mean."""
+        return masked_mean(summary, mask)
+
     @abstractmethod
     def deterministic_path(self, ex_context: Tensor, s_context: Tensor, ex_target: Tensor,
                            context_mask: Mask = None) -> Tensor:
-        """Deterministic representation for each target point: (B, T, r_dim)."""
+        """Deterministic representation for each target point: (B, T, r_dim).
+
+        s_context and context_mask are what `summarize` returned for the context."""
 
     # --- forward --------------------------------------------------------------
 
@@ -269,25 +294,26 @@ class NeuralProcess(nn.Module, ABC):
         use_posterior: sample z from q(z | context ∪ target) instead of q(z | context).
             None (default) means "in training mode, if y_target is given", which is what
             the ELBO needs and keeps validation from ever seeing y_target.
+            Ignored without a latent (use_latent=False): y_target is then never used.
         """
         x_context = self.x_scaler(x_context, context_mask)
         x_target = self.x_scaler(x_target, target_mask)
         ex_c, ex_t = self.x_encoder(x_context), self.x_encoder(x_target)
 
-        s_c = self.encode_points(ex_c, y_context, context_mask)
-        pooled_c = masked_mean(s_c, context_mask)
-        z_prior = self.latent_encoder(pooled_c)
-        z_posterior = (self._posterior(ex_c, y_context, context_mask, ex_t, y_target, target_mask)
-                       if y_target is not None else None)
+        s_c, s_mask = self.summarize(ex_c, y_context, context_mask)
+        z = z_prior = z_posterior = None
+        if self.cfg.use_latent:
+            z_prior = self.latent_encoder(self.pool(s_c, s_mask))
+            z_posterior = (self._posterior(ex_c, y_context, context_mask, ex_t, y_target, target_mask)
+                           if y_target is not None else None)
+            if use_posterior is None:
+                use_posterior = self.training and z_posterior is not None
+            if use_posterior and z_posterior is None:
+                raise ValueError("use_posterior=True needs y_target")
+            z = (z_posterior if use_posterior else z_prior).rsample((num_samples,))  # (S, B, z_dim)
 
-        if use_posterior is None:
-            use_posterior = self.training and z_posterior is not None
-        if use_posterior and z_posterior is None:
-            raise ValueError("use_posterior=True needs y_target")
-        z = (z_posterior if use_posterior else z_prior).rsample((num_samples,))  # (S, B, z_dim)
-
-        r_t = self.deterministic_path(ex_c, s_c, ex_t, context_mask)
-        y_dist = self._decode(z, r_t, ex_t, x_target)
+        r_t = self.deterministic_path(ex_c, s_c, ex_t, s_mask)
+        y_dist = self._decode(z, r_t, ex_t, x_target, num_samples)
         return NPOutput(y_dist, z_prior, z_posterior)
 
     # --- internals ------------------------------------------------------------
@@ -305,15 +331,25 @@ class NeuralProcess(nn.Module, ABC):
         else:
             ex, mask = _concat_sets(ex_c, ex_t, mask_c, mask_t)
             y = torch.cat([y_c, y_t], dim=1)
-        return self.latent_encoder(masked_mean(self.encode_points(ex, y, mask), mask))
+        summary, summary_mask = self.summarize(ex, y, mask)
+        return self.latent_encoder(self.pool(summary, summary_mask))
 
-    def _decode(self, z: Tensor, r_t: Tensor, ex_t: Tensor, x_t: Tensor) -> Normal:
-        """z (S, B, z_dim), r_t and ex_t (B, T, r_dim), x_t (B, T, x_dim) -> p(y), (S, B, T, y_dim).
+    def _decode(self, z: Optional[Tensor], r_t: Tensor, ex_t: Tensor, x_t: Tensor,
+                num_samples: int) -> Normal:
+        """z (S, B, z_dim) or None, r_t and ex_t (B, T, r_dim), x_t (B, T, x_dim)
+        -> p(y), (S, B, T, y_dim).
 
         The raw x_t is passed too, so the exact position is never lost in the embedding.
+        Without a latent the prediction is computed once and repeated over the S samples
+        (an expanded view, no extra cost).
         """
+        per_point = torch.cat([r_t, ex_t, x_t], dim=-1)
+        if z is None:
+            mean, var = self.decoder(per_point)                        # (B, T, y_dim)
+            shape = (num_samples,) + mean.shape
+            return Normal(mean.unsqueeze(0).expand(shape), var.sqrt().unsqueeze(0).expand(shape))
         S, (B, T) = z.shape[0], x_t.shape[:2]
-        per_point = torch.cat([r_t, ex_t, x_t], dim=-1).unsqueeze(0).expand(S, -1, -1, -1)
+        per_point = per_point.unsqueeze(0).expand(S, -1, -1, -1)
         decoder_in = torch.cat([z.unsqueeze(2).expand(S, B, T, -1), per_point], dim=-1)
         mean, var = self.decoder(decoder_in)
         return Normal(mean, var.sqrt())

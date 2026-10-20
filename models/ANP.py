@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from layers import MultiheadAttention
-from base import Mask, NeuralProcess, NPConfig
+from models.base import Mask, NeuralProcess, NPConfig
 
 __all__ = ["AttentiveNP"]
 
