@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.distributions import Normal
 
-from layers import MLP, FourierFeatures, GaussianDecoder, inverse_softplus
+from layers import MLP, FourierFeatures, GaussianDecoder, MultiheadAttention, inverse_softplus
 
 __all__ = ["NPConfig", "NPOutput", "NeuralProcess", "InputScaler", "Mask", "masked_mean"]
 
@@ -59,6 +59,9 @@ class NPConfig:
 
     # Latent variable
     use_latent: bool = True            # False: conditional NP (no z; loss = NLL only)
+    pooling: str = "mean"              # how the context gives q(z): "mean", "attention" or "bayesian"
+                                       # "attention": cross-attention with one learned query (PMA);
+                                       # "bayesian": precision-weighted Gaussian update (Volpp et al.)
     posterior_max_targets: Optional[int] = None
     min_latent_var: float = 1e-4
 
@@ -220,6 +223,40 @@ class LatentEncoder(nn.Module):
         return Normal(mu, (self.min_var + F.softplus(raw)).sqrt())
 
 
+class BayesianAggregation(nn.Module):
+    """Bayesian context aggregation (Volpp et al., ICLR 2021): point set (B, N, r_dim) -> Normal over z.
+
+    Every point gives an observation of z, r_i, with its own uncertainty sigma_i^2 (both learned from
+    the point's representation). Starting from a learned Gaussian prior N(mu_0, sigma_0^2), they are
+    combined like a Kalman / Gaussian update, per dimension of z:
+        1 / sigma_z^2 = 1 / sigma_0^2 + sum_i 1 / sigma_i^2
+        mu_z          = mu_0 + sigma_z^2 * sum_i (r_i - mu_0) / sigma_i^2
+    Points the model finds unreliable (large sigma_i) count less, and more informative points make
+    q(z) narrower, which a mean or an attention pooling cannot express. Padded points are ignored.
+    """
+
+    def __init__(self, cfg: NPConfig, init_point_var: float = 10.0):
+        super().__init__()
+        self.net = MLP(cfg.r_dim, 2 * cfg.z_dim, hidden_dim=cfg.hidden_dim, n_hidden=cfg.n_hidden,
+                       activation=cfg.activation, norm=cfg.norm)
+        self.min_var = cfg.min_latent_var
+        self.prior_mean = nn.Parameter(torch.zeros(cfg.z_dim))
+        self.prior_raw_var = nn.Parameter(torch.full((cfg.z_dim,), inverse_softplus(1.0)))
+        with torch.no_grad():  # points start uninformative (large variance), so q(z) starts wide
+            self.net.head.weight[cfg.z_dim:].mul_(0.1)
+            self.net.head.bias[cfg.z_dim:].fill_(inverse_softplus(init_point_var))
+
+    def forward(self, points: Tensor, mask: Mask = None) -> Normal:
+        r, raw = self.net(points).chunk(2, dim=-1)                           # (B, N, z_dim) each
+        precision = 1.0 / (self.min_var + F.softplus(raw))                  # 1 / sigma_i^2
+        if mask is not None:
+            precision = precision.masked_fill(mask.unsqueeze(-1), 0.0)      # padding adds nothing
+        prior_var = self.min_var + F.softplus(self.prior_raw_var)
+        var = 1.0 / (1.0 / prior_var + precision.sum(dim=1))                 # (B, z_dim)
+        mean = self.prior_mean + var * (precision * (r - self.prior_mean)).sum(dim=1)
+        return Normal(mean, var.clamp(min=self.min_var).sqrt())
+
+
 # ----------------------------------------------------------------------------- base model
 
 class NeuralProcess(nn.Module, ABC):
@@ -247,7 +284,16 @@ class NeuralProcess(nn.Module, ABC):
         self.x_encoder = XEncoder(cfg)
         self.y_embed = nn.Linear(cfg.y_dim, cfg.r_dim)  # so y is not drowned out by e(x)
         self.xy_encoder = MLP(2 * cfg.r_dim, cfg.r_dim, n_hidden=cfg.n_hidden, **mlp_kwargs)
-        self.latent_encoder = LatentEncoder(cfg) if cfg.use_latent else None
+        if cfg.pooling not in ("mean", "attention", "bayesian"):
+            raise ValueError(f"pooling must be 'mean', 'attention' or 'bayesian', got {cfg.pooling!r}")
+        bayesian = cfg.use_latent and cfg.pooling == "bayesian"
+        self.latent_encoder = LatentEncoder(cfg) if cfg.use_latent and not bayesian else None
+        self.bayesian_aggregation = BayesianAggregation(cfg) if bayesian else None
+        if cfg.use_latent and cfg.pooling == "attention":
+            # Pooling by multihead attention (Set Transformer, Lee et al., 2019): a learned query reads
+            # the point set; each head is its own learned weighted average of the points.
+            self.pool_query = nn.Parameter(torch.randn(1, 1, cfg.r_dim) * 0.02)
+            self.pool_attention = MultiheadAttention(cfg.r_dim, cfg.num_heads, cfg.dropout)
         self.decoder = GaussianDecoder(
             (cfg.z_dim if cfg.use_latent else 0) + 2 * cfg.r_dim + cfg.x_dim, cfg.y_dim,
             output_groups=cfg.output_groups,
@@ -265,9 +311,27 @@ class NeuralProcess(nn.Module, ABC):
         """Representation of a point set and its padding mask. Default: one vector per point."""
         return self.encode_points(ex, y, mask), mask
 
+    def pool_points(self, summary: Tensor) -> Tensor:
+        """The point set (B, N, r_dim) the latent path is computed from. Default: the summary itself."""
+        return summary
+
     def pool(self, summary: Tensor, mask: Mask = None) -> Tensor:
-        """Summary -> one vector (B, r_dim), the input of the latent encoder. Default: the mean."""
-        return masked_mean(summary, mask)
+        """Summary -> one vector (B, r_dim), the input of the latent encoder."""
+        return self.aggregate(self.pool_points(summary), mask)
+
+    def latent_distribution(self, summary: Tensor, mask: Mask = None) -> Normal:
+        """q(z | point set): pooling + latent encoder, or the Bayesian aggregation of the points."""
+        if self.bayesian_aggregation is not None:
+            return self.bayesian_aggregation(self.pool_points(summary), mask)
+        return self.latent_encoder(self.pool(summary, mask))
+
+    def aggregate(self, points: Tensor, mask: Mask = None) -> Tensor:
+        """A point set (B, N, r_dim) -> one vector (B, r_dim), as set by cfg.pooling: the mean, or
+        cross-attention with a learned query. Padded points are ignored either way."""
+        if self.cfg.pooling == "attention":
+            query = self.pool_query.expand(points.shape[0], -1, -1)
+            return self.pool_attention(query, points, points, key_padding_mask=mask)[:, 0]
+        return masked_mean(points, mask)
 
     @abstractmethod
     def deterministic_path(self, ex_context: Tensor, s_context: Tensor, ex_target: Tensor,
@@ -303,7 +367,7 @@ class NeuralProcess(nn.Module, ABC):
         s_c, s_mask = self.summarize(ex_c, y_context, context_mask)
         z = z_prior = z_posterior = None
         if self.cfg.use_latent:
-            z_prior = self.latent_encoder(self.pool(s_c, s_mask))
+            z_prior = self.latent_distribution(s_c, s_mask)
             z_posterior = (self._posterior(ex_c, y_context, context_mask, ex_t, y_target, target_mask)
                            if y_target is not None else None)
             if use_posterior is None:
@@ -332,7 +396,7 @@ class NeuralProcess(nn.Module, ABC):
             ex, mask = _concat_sets(ex_c, ex_t, mask_c, mask_t)
             y = torch.cat([y_c, y_t], dim=1)
         summary, summary_mask = self.summarize(ex, y, mask)
-        return self.latent_encoder(self.pool(summary, summary_mask))
+        return self.latent_distribution(summary, summary_mask)
 
     def _decode(self, z: Optional[Tensor], r_t: Tensor, ex_t: Tensor, x_t: Tensor,
                 num_samples: int) -> Normal:

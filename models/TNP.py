@@ -22,7 +22,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from layers import TransformerBlock
-from models.base import Mask, NeuralProcess, NPConfig, masked_mean
+from models.base import Mask, NeuralProcess, NPConfig
 
 __all__ = ["TransformerNP"]
 
@@ -60,8 +60,8 @@ class TransformerNP(NeuralProcess):
             layers.append(context)
         return torch.stack(layers, dim=2), mask
 
-    def pool(self, summary: Tensor, mask: Mask = None) -> Tensor:
-        return masked_mean(self.norm(summary[:, :, -1]), mask)
+    def pool_points(self, summary: Tensor) -> Tensor:
+        return self.norm(summary[:, :, -1])  # the context after the last block
 
     def deterministic_path(self, ex_context: Tensor, s_context: Tensor, ex_target: Tensor,
                            context_mask: Mask = None) -> Tensor:

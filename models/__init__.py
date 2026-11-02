@@ -5,7 +5,7 @@ from models.LNP import LatentNP
 from models.ANP import AttentiveNP
 from models.TNP import TransformerNP
 from models.SenseiverNP import SenseiverNP
-from models.baselines import SHRED, DeepONet
+from models.baselines import SHRED, DeepONet, Senseiver
 
 __all__ = ["NeuralProcess", "NPConfig", "NPOutput", "LatentNP", "AttentiveNP", "TransformerNP",
-           "SenseiverNP", "SHRED", "DeepONet"]
+           "SenseiverNP", "SHRED", "DeepONet", "Senseiver"]

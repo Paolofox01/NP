@@ -6,8 +6,9 @@ same structure as the Latent Bottlenecked ANP of Feng et al., 2023).
   of context points becomes a fixed-size set of latents; the cost is linear in the context size.
 - Targets: each e(x_target) cross-attends to the latents (one block), and never to the other
   targets.
-- Latent path (use_latent=True): z from the mean of the latents; for the posterior the latents
-  read context and targets together, again in linear time.
+- Latent path (use_latent=True): z from the latents, as set by cfg.pooling (their mean, a
+  learned-query attention, or a Bayesian aggregation); for the posterior the latents read context
+  and targets together, again in linear time.
 
 With use_latent=False this is the conditional model of the papers (the original Senseiver is
 also trained on the MSE, i.e. without a predicted variance).

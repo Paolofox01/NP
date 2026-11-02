@@ -1,7 +1,8 @@
-"""Baselines for the sensor-to-field problem: SHRED, DeepONet and probabilistic DeepONet.
+"""Baselines for the sensor-to-field problem: SHRED, DeepONet (deterministic and probabilistic)
+and the Senseiver.
 
-All three read the sensors' recent history with a sequence encoder, on the same tasks the Neural
-Processes see (pinball_data.py). At each time step the encoder gets, for every sensor slot, the
+SHRED and DeepONet read the sensors' recent history with a sequence encoder, on the same tasks the
+Neural Processes see (pinball_data.py). At each time step the encoder gets, for every sensor slot, the
 reading, a 0/1 flag (0 = no reading: a dropped sensor, or a step before the task's lag; its value
 is set to 0) and the sensor's (x, y) position, plus the relative time of the step. The positions only
 carry information when the sensors vary between tasks; with fixed sensors they are constant.
@@ -22,6 +23,11 @@ Two encoders, chosen with encoder="lstm" | "transformer":
   product, a second output of the head for attention), trained on the Gaussian NLL (with an MSE
   warm-up at the start).
 
+- Senseiver (Santos et al., 2023): a Perceiver IO over the sensor readings as a set (value +
+  sine-cosine encoding of time and position, like the NPs' context), with learned output queries.
+  Probabilistic by default (mean and variance, Gaussian NLL); probabilistic=False is the original
+  deterministic model (MSE).
+
 Every model maps a batch (the dictionaries of pinball_data.py) to (mean, var), each (B, T),
 with var None for the deterministic ones. Their loss and training loop are in
 training/train_baselines.py.
@@ -35,9 +41,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from layers import FourierFeatures, TransformerBlock, inverse_softplus
+from layers import FourierFeatures, MultiheadAttention, TransformerBlock, inverse_softplus
+from models.base import InputScaler
 
-__all__ = ["SensorLSTM", "SensorTransformer", "make_sensor_encoder", "SHRED", "DeepONet"]
+__all__ = ["SensorLSTM", "SensorTransformer", "make_sensor_encoder", "SHRED", "DeepONet",
+           "SineCosineEncoding", "Senseiver"]
 
 Batch = Dict[str, Tensor]
 Prediction = Tuple[Tensor, Optional[Tensor]]
@@ -239,4 +247,97 @@ class DeepONet(nn.Module):
         ]
         mean = outputs[0]
         var = self.min_var + F.softplus(outputs[1]) if self.probabilistic else None
+        return mean, var
+
+
+# ----------------------------------------------------------------------------- Senseiver
+
+class SineCosineEncoding(nn.Module):
+    """Fixed sine-cosine encoding of coordinates in [-1, 1] (as in the Perceiver / Senseiver):
+    for every dimension, [x, sin(pi f_k x), cos(pi f_k x)] with n_frequencies frequencies f_k
+    spaced linearly from 1 to max_frequency / 2. (..., dim) -> (..., dim * (2 n_frequencies + 1))."""
+
+    def __init__(self, dim: int, n_frequencies: int = 16, max_frequency: float = 32.0):
+        super().__init__()
+        self.register_buffer("frequencies", torch.linspace(1.0, max_frequency / 2, n_frequencies))
+        self.out_dim = dim * (2 * n_frequencies + 1)
+
+    def forward(self, x: Tensor) -> Tensor:
+        angles = math.pi * x.unsqueeze(-1) * self.frequencies                  # (..., dim, F)
+        return torch.cat([x.unsqueeze(-1), angles.sin(), angles.cos()], dim=-1).flatten(-2)
+
+
+class Senseiver(nn.Module):
+    """Senseiver (Santos et al., 2023): Perceiver IO for field reconstruction from sparse sensors.
+
+    Encoder: each reading is a token Linear([y, enc(x)]), with x = ([mu,] relative time, position)
+    scaled to [-1, 1] and enc the sine-cosine encoding. n_latents learned latents (Q_in) read the
+    tokens with an attention block (cross-attention + MLP, self-attention + MLP); a second block,
+    with weights shared across n_recurrent repetitions, lets the latents re-read the tokens and
+    process them again. Padded readings are masked out.
+    Decoder: for every target and every output variable the query is Linear([enc(x_q), Q_out_v]),
+    Q_out_v a learned vector per variable; one cross-attention to the latents and a linear head
+    give the mean (and the variance: min_var + softplus, if probabilistic).
+
+    Targets never see each other, and the readings form a set (no slots), so any number of
+    sensors at any positions can be used, as in the Neural Processes.
+    """
+
+    def __init__(self, x_dim: int, y_dim: int = 1, x_low=-1.0, x_high=1.0, probabilistic: bool = True,
+                 n_latents: int = 32, width: int = 128, num_heads: int = 4, n_recurrent: int = 2,
+                 n_frequencies: int = 16, max_frequency: float = 32.0, query_dim: int = 16,
+                 dropout: float = 0.0, min_var: float = 1e-4, init_var: float = 0.05):
+        super().__init__()
+        x_low = torch.as_tensor(x_low, dtype=torch.float32).expand(x_dim).tolist()
+        x_high = torch.as_tensor(x_high, dtype=torch.float32).expand(x_dim).tolist()
+        self.kwargs = dict(x_dim=x_dim, y_dim=y_dim, x_low=x_low, x_high=x_high, probabilistic=probabilistic,
+                           n_latents=n_latents, width=width, num_heads=num_heads, n_recurrent=n_recurrent,
+                           n_frequencies=n_frequencies, max_frequency=max_frequency, query_dim=query_dim,
+                           dropout=dropout, min_var=min_var, init_var=init_var)
+        self.probabilistic, self.y_dim, self.n_recurrent, self.min_var = probabilistic, y_dim, n_recurrent, min_var
+
+        self.scaler = InputScaler(x_dim, x_low, x_high)
+        self.encoding = SineCosineEncoding(x_dim, n_frequencies, max_frequency)
+        self.embed = nn.Linear(y_dim + self.encoding.out_dim, width)
+        block = lambda: TransformerBlock(width, num_heads, dropout)
+        self.latents = nn.Parameter(torch.randn(n_latents, width) * 0.02)               # Q_in
+        self.read_1, self.process_1 = block(), block()                                   # attention block 1
+        self.read_2, self.process_2 = block(), block()                                   # attention block 2 (recurrent)
+        self.latent_norm = nn.LayerNorm(width)
+
+        self.output_queries = nn.Parameter(torch.randn(y_dim, query_dim) * 0.02)         # Q_out, one per variable
+        self.query = nn.Linear(self.encoding.out_dim + query_dim, width)
+        self.cross_attention = MultiheadAttention(width, num_heads, dropout)
+        self.output_norm = nn.LayerNorm(width)
+        self.head = nn.Linear(width, 2 if probabilistic else 1)
+        if probabilistic:
+            with torch.no_grad():
+                self.head.weight[1].mul_(0.1)
+                self.head.bias[1] = inverse_softplus(init_var - min_var)
+
+    def encode(self, x_context: Tensor, y_context: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+        """Readings (B, N, x_dim), (B, N, y_dim) -> latents (B, n_latents, width)."""
+        tokens = self.embed(torch.cat([y_context, self.encoding(self.scaler(x_context, mask))], dim=-1))
+        latents = self.latents.expand(tokens.shape[0], -1, -1)
+        latents = self.read_1(latents, tokens, tokens, key_padding_mask=mask)
+        latents = self.process_1(latents, latents, latents)
+        for _ in range(self.n_recurrent):
+            latents = self.read_2(latents, tokens, tokens, key_padding_mask=mask)
+            latents = self.process_2(latents, latents, latents)
+        return self.latent_norm(latents)
+
+    def forward(self, batch: Batch) -> Prediction:
+        latents = self.encode(batch["x_context"], batch["y_context"], batch.get("context_mask"))
+        a_q = self.encoding(self.scaler(batch["x_target"], batch.get("target_mask")))   # (B, T, E)
+        B, T, E = a_q.shape
+        V = self.y_dim
+        queries = torch.cat([a_q.unsqueeze(2).expand(B, T, V, E),
+                             self.output_queries.expand(B, T, V, -1)], dim=-1)          # (B, T, V, E + q)
+        h = self.cross_attention(self.query(queries).reshape(B, T * V, -1), latents, latents)
+        out = self.head(self.output_norm(h)).reshape(B, T, V, -1)
+        mean = out[..., 0]
+        var = self.min_var + F.softplus(out[..., 1]) if self.probabilistic else None
+        if V == 1:                                                                        # (B, T), like the other baselines
+            mean = mean.squeeze(-1)
+            var = var.squeeze(-1) if var is not None else None
         return mean, var
