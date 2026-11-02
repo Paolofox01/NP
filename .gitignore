@@ -1,0 +1,9 @@
+# Too large for GitHub (558 MB): kept in Drive / a Kaggle dataset
+pinball/Pinball_data.npz
+
+# Run outputs
+pinball/results_pinball*/
+pinball/logs_pinball/
+results_*/
+__pycache__/
+.ipynb_checkpoints/
