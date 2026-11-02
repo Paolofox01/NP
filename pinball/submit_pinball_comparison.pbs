@@ -1,0 +1,136 @@
+#!/bin/bash
+#PBS -N Pinball_comparison
+#PBS -q gpu
+#PBS -l select=1:ncpus=8:ngpus=1:mem=64gb
+#PBS -l walltime=12:00:00
+
+# Trains the pinball models (pinball_np_comparison.ipynb) and saves their parameter counts,
+# training times, validation and test metrics to results.json in OUTPUT_DIR.
+#
+# Submit from the project root or from pinball/:
+#   qsub pinball/submit_pinball_comparison.pbs                               # every model
+#   qsub -v MODELS="LatentNP,AttentiveNP,TNP",TAG=nps pinball/submit_pinball_comparison.pbs
+#   qsub -v MODELS="TNP,SenseiverNP",USE_LATENT=0,TAG=tnp_conditional pinball/submit_pinball_comparison.pbs
+#   qsub -v MODELS="LatentNP,AttentiveNP",POOLING=attention,TAG=nps_pma pinball/submit_pinball_comparison.pbs
+#   qsub -v MODELS="LatentNP,AttentiveNP,TNP",POOLING=bayesian,TAG=nps_ba pinball/submit_pinball_comparison.pbs
+#
+# MODELS:     comma-separated subset (names as in the notebook's NP_MODELS / BASELINES); empty = all.
+# USE_LATENT: 1 (default) = latent NPs with z, 0 = conditional NPs.
+# POOLING:    how the context gives q(z): mean (default), attention (a learned query) or bayesian
+#             (precision-weighted Bayesian aggregation).
+# TAG:        name of this run: results go to results_pinball/<TAG>, logs to logs_pinball/<TAG>_*,
+#             so jobs with different subsets do not overwrite each other.
+
+NOTEBOOK_NAME="pinball_np_comparison.ipynb"
+TAG="${TAG:-all}"
+
+# Resolve project directories whether qsub is run from the project root or pinball/.
+if [ -f "${PBS_O_WORKDIR}/pinball/${NOTEBOOK_NAME}" ]; then
+    PROJECT_ROOT="${PBS_O_WORKDIR}"
+    WORKDIR="${PROJECT_ROOT}/pinball"
+elif [ -f "${PBS_O_WORKDIR}/${NOTEBOOK_NAME}" ]; then
+    WORKDIR="${PBS_O_WORKDIR}"
+    PROJECT_ROOT="$(cd "${PBS_O_WORKDIR}/.." && pwd)"
+else
+    echo "ERROR: Could not locate ${NOTEBOOK_NAME} under ${PBS_O_WORKDIR}"
+    exit 1
+fi
+
+# Folder with Pinball_mesh.xml and Pinball_data.npz. Default: next to the notebook; change it if
+# the data lives elsewhere (it must be inside a folder bound into the container, see BINDPATH).
+DATA_DIR="${WORKDIR}"
+OUTPUT_DIR="${WORKDIR}/results_pinball/${TAG}"
+CONTAINER="/work/u10740203/fenics_project/my_fenics.sif"
+
+LOGDIR="${WORKDIR}/logs_pinball"
+mkdir -p "$LOGDIR" "$OUTPUT_DIR"
+LOGFILE="${LOGDIR}/${TAG}_${PBS_JOBID%%.*}.log"
+ERRFILE="${LOGDIR}/${TAG}_${PBS_JOBID%%.*}.err"
+
+# Writable caches (FEniCS JIT, matplotlib, temporary files) on node-local scratch.
+NODE_SCRATCH="${PBS_JOBFS:-${TMPDIR:-/tmp}}"
+CACHEDIR="${NODE_SCRATCH}/pinball_cache_${PBS_JOBID}"
+mkdir -p "${CACHEDIR}/tmp" "${CACHEDIR}/xdg" "${CACHEDIR}/matplotlib" \
+         "${CACHEDIR}/dijitso" "${CACHEDIR}/instant" "${CACHEDIR}/ffc"
+
+{
+    echo "====================================================================="
+    echo "Job ID: $PBS_JOBID"
+    echo "Job Name: $PBS_JOBNAME"
+    echo "Queue: $PBS_QUEUE"
+    echo "Node: $(hostname)"
+    echo "Notebook: ${WORKDIR}/${NOTEBOOK_NAME}"
+    echo "Model code: $PROJECT_ROOT"
+    echo "Data Directory: $DATA_DIR"
+    echo "Output Directory: $OUTPUT_DIR"
+    echo "Models: ${MODELS:-all}   Latent: ${USE_LATENT:-1}   Pooling: ${POOLING:-mean}   Tag: $TAG"
+    echo "Start Time: $(date)"
+    echo "====================================================================="
+
+    if [ ! -f "$CONTAINER" ]; then
+        echo "ERROR: Container not found at $CONTAINER"
+        exit 1
+    fi
+    for file in models/__init__.py layers/__init__.py training/__init__.py pinball/pinball_data.py; do
+        if [ ! -f "${PROJECT_ROOT}/${file}" ]; then
+            echo "ERROR: ${file} not found in ${PROJECT_ROOT}"
+            exit 1
+        fi
+    done
+    for file in Pinball_mesh.xml Pinball_data.npz; do
+        if [ ! -f "${DATA_DIR}/${file}" ]; then
+            echo "ERROR: ${file} not found in ${DATA_DIR} (set DATA_DIR in this script)"
+            exit 1
+        fi
+    done
+
+    nvidia-smi
+
+    # Settings for the notebook (it falls back to its own defaults when these are unset).
+    export APPTAINERENV_NP_CODE_DIR="$PROJECT_ROOT"
+    export APPTAINERENV_PINBALL_DATA_DIR="$DATA_DIR"
+    export APPTAINERENV_PINBALL_OUTPUT_DIR="$OUTPUT_DIR"
+    export APPTAINERENV_PINBALL_MODELS="${MODELS:-}"
+    export APPTAINERENV_PINBALL_USE_LATENT="${USE_LATENT:-1}"
+    export APPTAINERENV_PINBALL_POOLING="${POOLING:-mean}"
+
+    export APPTAINERENV_PYTHONUNBUFFERED=1         # progress reaches the log immediately
+    export APPTAINERENV_MPLBACKEND=Agg             # no display: figures are only saved
+    export APPTAINERENV_TQDM_DISABLE=1             # no progress bars in the log files
+    export APPTAINERENV_TMPDIR="${CACHEDIR}/tmp"
+    export APPTAINERENV_XDG_CACHE_HOME="${CACHEDIR}/xdg"
+    export APPTAINERENV_MPLCONFIGDIR="${CACHEDIR}/matplotlib"
+    export APPTAINERENV_DIJITSO_CACHE_DIR="${CACHEDIR}/dijitso"
+    export APPTAINERENV_INSTANT_CACHE_DIR="${CACHEDIR}/instant"
+    export APPTAINERENV_FFC_CACHE_DIR="${CACHEDIR}/ffc"
+    export APPTAINER_BINDPATH="${PROJECT_ROOT}:${PROJECT_ROOT},${CACHEDIR}:${CACHEDIR}"
+
+    # Run the notebook's code cells as a script, from the notebook's folder (so its relative
+    # paths behave as in Jupyter). No Jupyter needed in the container, and training progress
+    # is written to the log as it happens. The extracted script is kept next to the logs.
+    SCRIPT="${LOGDIR}/${TAG}_${PBS_JOBID%%.*}.py"
+    cd "$WORKDIR" || { echo "ERROR: Failed to cd to $WORKDIR"; exit 1; }
+    apptainer exec --nv "$CONTAINER" python3 - "$NOTEBOOK_NAME" "$SCRIPT" <<'EOF'
+import json, sys
+notebook, script = sys.argv[1], sys.argv[2]
+cells = json.load(open(notebook, encoding="utf-8"))["cells"]
+code = ["".join(cell["source"]) for cell in cells if cell["cell_type"] == "code"]
+with open(script, "w", encoding="utf-8") as f:
+    f.write("\n\n".join(code) + "\n")
+print(f"Extracted {len(code)} code cells to {script}")
+EOF
+    apptainer exec --nv "$CONTAINER" python3 -u "$SCRIPT"
+    EXIT_CODE=$?
+
+    echo ""
+    echo "====================================================================="
+    echo "TRAINING FINISHED"
+    echo "Exit code: $EXIT_CODE"
+    echo "Results: ${OUTPUT_DIR}/results.json"
+    echo "End Time: $(date)"
+    echo "====================================================================="
+
+    rm -rf "$CACHEDIR"
+    exit $EXIT_CODE
+
+} > "$LOGFILE" 2> "$ERRFILE"
