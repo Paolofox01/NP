@@ -4,6 +4,7 @@ pinball/Pinball_data.npz
 # Run outputs
 pinball/results_pinball*/
 pinball/logs_pinball/
+swe/logs_swe_np_comparison/
 results_*/
 __pycache__/
 .ipynb_checkpoints/

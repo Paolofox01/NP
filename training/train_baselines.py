@@ -21,7 +21,10 @@ Prediction = Tuple[Tensor, Optional[Tensor]]
 # ----------------------------------------------------------------------------- loss and evaluation
 
 def _masked_mean(values: Tensor, mask: Optional[Tensor]) -> Tensor:
-    """Mean over the real targets: per task, then over the batch (as np_loss does)."""
+    """Mean over the real targets: per task, then over the batch (as np_loss does). values: (B, T), or
+    (B, T, V) for several variables, which are averaged per target first (a per-value mean)."""
+    if values.ndim == 3:
+        values = values.mean(-1)
     if mask is None:
         return values.mean()
     keep = (~mask).float()

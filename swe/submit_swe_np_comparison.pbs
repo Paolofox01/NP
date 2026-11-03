@@ -1,14 +1,27 @@
 #!/bin/bash
-#PBS -N SWE_NP_comparison
+#PBS -N SWE_comparison
 #PBS -q gpu
 #PBS -l select=1:ncpus=8:ngpus=1:mem=300gb
 #PBS -l walltime=12:00:00
 
-# Trains LatentNP and AttentiveNP one after the other (swe_np_comparison.ipynb) and saves
-# their parameter counts, training times and metrics to results.json in OUTPUT_DIR.
-# Submit from the project root or from swe/:  qsub swe/submit_swe_np_comparison.pbs
+# Trains the SWE models (swe_np_comparison.ipynb) and saves their parameter counts, training times,
+# validation and test metrics to results.json in OUTPUT_DIR.
+#
+# Submit from the project root or from swe/:
+#   qsub swe/submit_swe_np_comparison.pbs                                  # every model
+#   qsub -v MODELS="LatentNP,AttentiveNP,TNP",TAG=nps swe/submit_swe_np_comparison.pbs
+#   qsub -v MODELS="TNP,SenseiverNP",USE_LATENT=0,TAG=tnp_conditional swe/submit_swe_np_comparison.pbs
+#   qsub -v MODELS="LatentNP,AttentiveNP",POOLING=attention,TAG=nps_pma swe/submit_swe_np_comparison.pbs
+#
+# MODELS:     comma-separated subset (names as in the notebook's NP_MODELS / BASELINES); empty = all.
+# USE_LATENT: 1 (default) = latent NPs with z, 0 = conditional NPs.
+# POOLING:    how the context gives q(z): mean (default), attention (a learned query) or bayesian
+#             (precision-weighted Bayesian aggregation).
+# TAG:        name of this run: results go to results_swe/<TAG>, logs to logs_swe_np_comparison/<TAG>_*,
+#             so jobs with different subsets do not overwrite each other.
 
 NOTEBOOK_NAME="swe_np_comparison.ipynb"
+TAG="${TAG:-all}"
 
 # Resolve project directories whether qsub is run from the project root or swe/.
 if [ -f "${PBS_O_WORKDIR}/swe/${NOTEBOOK_NAME}" ]; then
@@ -28,13 +41,13 @@ CODE_DIR="${PROJECT_ROOT}"
 
 # Fast NVMe node-local scratch on gpu02
 DATA_DIR="/scratch_local/u10740203/planetswe"
-OUTPUT_DIR="${WORKDIR}/results_np_comparison"
+OUTPUT_DIR="${WORKDIR}/results_swe/${TAG}"
 CONTAINER="/work/u10740203/fenics_project/my_fenics.sif"
 
 LOGDIR="${WORKDIR}/logs_swe_np_comparison"
 mkdir -p "$LOGDIR" "$DATA_DIR" "$OUTPUT_DIR"
-LOGFILE="${LOGDIR}/swe_np_comparison.log"
-ERRFILE="${LOGDIR}/swe_np_comparison.err"
+LOGFILE="${LOGDIR}/${TAG}_${PBS_JOBID%%.*}.log"
+ERRFILE="${LOGDIR}/${TAG}_${PBS_JOBID%%.*}.err"
 
 # Writable caches (matplotlib, temporary files) on node-local scratch.
 NODE_SCRATCH="${PBS_JOBFS:-${TMPDIR:-/tmp}}"
@@ -51,6 +64,7 @@ mkdir -p "${CACHEDIR}/tmp" "${CACHEDIR}/xdg" "${CACHEDIR}/matplotlib"
     echo "Model code: $CODE_DIR"
     echo "Dataset Directory: $DATA_DIR"
     echo "Output Directory: $OUTPUT_DIR"
+    echo "Models: ${MODELS:-all}   Latent: ${USE_LATENT:-1}   Pooling: ${POOLING:-mean}   Tag: $TAG"
     echo "Start Time: $(date)"
     echo "====================================================================="
 
@@ -71,6 +85,9 @@ mkdir -p "${CACHEDIR}/tmp" "${CACHEDIR}/xdg" "${CACHEDIR}/matplotlib"
     export APPTAINERENV_NP_CODE_DIR="$CODE_DIR"
     export APPTAINERENV_SWE_DATA_DIR="$DATA_DIR"
     export APPTAINERENV_SWE_OUTPUT_DIR="$OUTPUT_DIR"
+    export APPTAINERENV_SWE_MODELS="${MODELS:-}"
+    export APPTAINERENV_SWE_USE_LATENT="${USE_LATENT:-1}"
+    export APPTAINERENV_SWE_POOLING="${POOLING:-mean}"
 
     export APPTAINERENV_PYTHONUNBUFFERED=1         # progress reaches the log immediately
     export APPTAINERENV_MPLBACKEND=Agg             # no display: figures are only saved
@@ -83,7 +100,7 @@ mkdir -p "${CACHEDIR}/tmp" "${CACHEDIR}/xdg" "${CACHEDIR}/matplotlib"
     # Run the notebook's code cells as a script, from the notebook's folder (so its relative
     # paths behave as in Jupyter). No Jupyter needed in the container, and training progress
     # is written to the log as it happens. The extracted script is kept next to the logs.
-    SCRIPT="${LOGDIR}/swe_np_comparison_${PBS_JOBID%%.*}.py"
+    SCRIPT="${LOGDIR}/${TAG}_${PBS_JOBID%%.*}.py"
     cd "$WORKDIR" || { echo "ERROR: Failed to cd to $WORKDIR"; exit 1; }
     apptainer exec --nv "$CONTAINER" python3 - "$NOTEBOOK_NAME" "$SCRIPT" <<'EOF'
 import json, sys

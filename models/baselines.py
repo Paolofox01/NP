@@ -28,8 +28,9 @@ Two encoders, chosen with encoder="lstm" | "transformer":
   Probabilistic by default (mean and variance, Gaussian NLL); probabilistic=False is the original
   deterministic model (MSE).
 
-Every model maps a batch (the dictionaries of pinball_data.py) to (mean, var), each (B, T),
-with var None for the deterministic ones. Their loss and training loop are in
+Every model maps a batch (the dictionaries of pinball_data.py) to (mean, var), each (B, T) (or (B, T, V)
+for V output variables, in DeepONet and Senseiver), with var None for the deterministic ones. Their loss
+and training loop are in
 training/train_baselines.py.
 """
 
@@ -54,20 +55,24 @@ Prediction = Tuple[Tensor, Optional[Tensor]]
 # ----------------------------------------------------------------------------- sensor encoders
 
 def _sensor_steps(batch: Batch) -> Tensor:
-    """Per time step: for each sensor slot (reading, flag, x, y), and the relative time: (B, L, 4S + 1)."""
-    history, on = batch["sensor_history"], batch["sensor_on"]           # (B, L, S) each
-    B, L, S = history.shape
-    position = batch["sensor_position"].reshape(B, 1, 2 * S).expand(B, L, -1)  # (B, L, 2S)
-    return torch.cat([history, on, position, batch["sensor_time"]], dim=-1)
+    """Per time step: for each sensor slot (reading(s), flag, position), and the relative time:
+    (B, L, S * (V + 1 + P) + 1), with V variables per reading and P coordinates per position."""
+    history, on = batch["sensor_history"], batch["sensor_on"]           # (B, L, S[, V]), (B, L, S)
+    if history.ndim == 3:
+        history = history.unsqueeze(-1)
+    B, L, S, V = history.shape
+    position = batch["sensor_position"].reshape(B, 1, -1).expand(B, L, -1)     # (B, L, S * P)
+    return torch.cat([history.reshape(B, L, S * V), on, position, batch["sensor_time"]], dim=-1)
 
 
 class SensorLSTM(nn.Module):
     """LSTM over the sensor history; returns the last hidden state of the top layer (B, hidden)."""
 
-    def __init__(self, n_sensors: int, hidden_size: int, num_layers: int = 2, dropout: float = 0.1):
+    def __init__(self, n_sensors: int, hidden_size: int, num_layers: int = 2, dropout: float = 0.1,
+                 y_dim: int = 1, pos_dim: int = 2):
         super().__init__()
         self.out_dim = hidden_size
-        self.lstm = nn.LSTM(4 * n_sensors + 1, hidden_size, num_layers=num_layers,
+        self.lstm = nn.LSTM(n_sensors * (y_dim + 1 + pos_dim) + 1, hidden_size, num_layers=num_layers,
                             batch_first=True, dropout=dropout if num_layers > 1 else 0.0)
 
     def forward(self, batch: Batch) -> Tensor:
@@ -90,11 +95,11 @@ class SensorTransformer(nn.Module):
     """
 
     def __init__(self, n_sensors: int, hidden_size: int, num_layers: int = 2, dropout: float = 0.1,
-                 num_heads: int = 4, time_frequencies: int = 8):
+                 num_heads: int = 4, time_frequencies: int = 8, y_dim: int = 1, pos_dim: int = 2):
         super().__init__()
         self.out_dim = hidden_size
         self.time_features = FourierFeatures(1, time_frequencies, scale=1.0, include_input=False)
-        self.embed = nn.Linear(4 * n_sensors + 1 + self.time_features.out_dim, hidden_size)
+        self.embed = nn.Linear(n_sensors * (y_dim + 1 + pos_dim) + 1 + self.time_features.out_dim, hidden_size)
         layer = nn.TransformerEncoderLayer(hidden_size, num_heads, dim_feedforward=4 * hidden_size,
                                            dropout=dropout, batch_first=True, norm_first=True)
         self.layers = nn.TransformerEncoder(layer, num_layers, enable_nested_tensor=False)
@@ -113,11 +118,12 @@ class SensorTransformer(nn.Module):
 
 
 def make_sensor_encoder(kind: str, n_sensors: int, hidden_size: int, num_layers: int,
-                        dropout: float, num_heads: int) -> nn.Module:
+                        dropout: float, num_heads: int, y_dim: int = 1, pos_dim: int = 2) -> nn.Module:
     if kind == "lstm":
-        return SensorLSTM(n_sensors, hidden_size, num_layers, dropout)
+        return SensorLSTM(n_sensors, hidden_size, num_layers, dropout, y_dim, pos_dim)
     if kind == "transformer":
-        return SensorTransformer(n_sensors, hidden_size, num_layers, dropout, num_heads)
+        return SensorTransformer(n_sensors, hidden_size, num_layers, dropout, num_heads,
+                                 y_dim=y_dim, pos_dim=pos_dim)
     raise ValueError(f"encoder must be 'lstm' or 'transformer', got {kind!r}")
 
 
@@ -176,6 +182,8 @@ class DeepONet(nn.Module):
     decoder="attention": the trunk features of each target (projected to encoder_hidden) are the
         query of attention_layers cross-attention blocks over the branch's per-time-step tokens
         (padded steps masked); a linear head gives the mean (and the variance, if probabilistic).
+    With y_dim > 1 variables, every variable has its own heads (mean, and variance if probabilistic),
+    and the prediction is (B, T, y_dim) instead of (B, T).
     """
 
     def __init__(self, n_sensors: int, n_params: int = 0, probabilistic: bool = False, p: int = 128,
@@ -183,7 +191,7 @@ class DeepONet(nn.Module):
                  num_heads: int = 8, dropout: float = 0.1, decoder: str = "dot", attention_layers: int = 1,
                  trunk_hidden: int = 256, head_hidden: int = 128, coord_dim: int = 2,
                  num_frequencies: int = 32, fourier_scale: float = 1.0, min_var: float = 1e-4,
-                 init_var: float = 0.05):
+                 init_var: float = 0.05, y_dim: int = 1, pos_dim: int = 2):
         super().__init__()
         if decoder not in ("dot", "attention"):
             raise ValueError(f"decoder must be 'dot' or 'attention', got {decoder!r}")
@@ -193,24 +201,25 @@ class DeepONet(nn.Module):
                            attention_layers=attention_layers,
                            trunk_hidden=trunk_hidden, head_hidden=head_hidden, coord_dim=coord_dim,
                            num_frequencies=num_frequencies, fourier_scale=fourier_scale,
-                           min_var=min_var, init_var=init_var)
+                           min_var=min_var, init_var=init_var, y_dim=y_dim, pos_dim=pos_dim)
         self.probabilistic, self.p, self.n_params, self.coord_dim = probabilistic, p, n_params, coord_dim
-        self.min_var, self.decoder = min_var, decoder
+        self.min_var, self.decoder, self.y_dim = min_var, decoder, y_dim
 
-        self.branch = make_sensor_encoder(encoder, n_sensors, encoder_hidden, encoder_layers, dropout, num_heads)
+        self.branch = make_sensor_encoder(encoder, n_sensors, encoder_hidden, encoder_layers, dropout, num_heads,
+                                          y_dim, pos_dim)
         self.fourier = FourierFeatures(coord_dim, num_frequencies, fourier_scale,
                                        learnable=True, include_input=True)
         self.trunk = _mlp([self.fourier.out_dim + n_params, trunk_hidden, trunk_hidden])
         self.trunk_act = nn.ReLU()
 
-        n_outputs = 2 if probabilistic else 1
+        n_outputs = y_dim * (2 if probabilistic else 1)                    # the means, then the variances
         if decoder == "dot":
             self.branch_heads = nn.ModuleList(_mlp([encoder_hidden, head_hidden, p]) for _ in range(n_outputs))
             self.trunk_heads = nn.ModuleList(_mlp([trunk_hidden, head_hidden, p]) for _ in range(n_outputs))
             self.bias = nn.Parameter(torch.zeros(n_outputs))
             if probabilistic:
                 with torch.no_grad():
-                    self.bias[1] = inverse_softplus(init_var - min_var)
+                    self.bias[y_dim:] = inverse_softplus(init_var - min_var)
         else:
             self.query = nn.Linear(trunk_hidden, encoder_hidden)
             self.cross_attention = nn.ModuleList(
@@ -219,11 +228,19 @@ class DeepONet(nn.Module):
             self.head = nn.Linear(encoder_hidden, n_outputs)
             if probabilistic:
                 with torch.no_grad():
-                    self.head.weight[1].mul_(0.1)
-                    self.head.bias[1] = inverse_softplus(init_var - min_var)
+                    self.head.weight[y_dim:].mul_(0.1)
+                    self.head.bias[y_dim:] = inverse_softplus(init_var - min_var)
+
+    def _split(self, out: Tensor) -> Prediction:
+        """(B, T, n_outputs) -> mean and variance, each (B, T) for one variable or (B, T, y_dim)."""
+        mean = out[..., :self.y_dim]
+        var = self.min_var + F.softplus(out[..., self.y_dim:]) if self.probabilistic else None
+        if self.y_dim == 1:
+            mean, var = mean.squeeze(-1), (var.squeeze(-1) if var is not None else None)
+        return mean, var
 
     def forward(self, batch: Batch) -> Prediction:
-        coords = batch["x_target"][..., -self.coord_dim:]                  # (B, T, 2): spatial only
+        coords = batch["x_target"][..., -self.coord_dim:]                  # (B, T, coord_dim): spatial only
         trunk_in = self.fourier(coords)
         if self.n_params:
             mu = batch["mu"].unsqueeze(1).expand(-1, coords.shape[1], -1)
@@ -235,19 +252,14 @@ class DeepONet(nn.Module):
             q = self.query(t)
             for block in self.cross_attention:
                 q = block(q, tokens, tokens, key_padding_mask=padding)
-            out = self.head(self.output_norm(q))                           # (B, T, 1 or 2)
-            mean = out[..., 0]
-            var = self.min_var + F.softplus(out[..., 1]) if self.probabilistic else None
-            return mean, var
+            return self._split(self.head(self.output_norm(q)))             # (B, T, n_outputs)
 
         h = self.branch(batch)                                             # (B, encoder_hidden)
         outputs = [
             (b_head(h).unsqueeze(1) * t_head(t)).sum(-1) / math.sqrt(self.p) + bias
             for b_head, t_head, bias in zip(self.branch_heads, self.trunk_heads, self.bias)
         ]
-        mean = outputs[0]
-        var = self.min_var + F.softplus(outputs[1]) if self.probabilistic else None
-        return mean, var
+        return self._split(torch.stack(outputs, dim=-1))
 
 
 # ----------------------------------------------------------------------------- Senseiver
