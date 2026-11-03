@@ -64,23 +64,27 @@ def np_loss(
     return LossTerms(nll + kl_weight * kl, nll, kl)
 
 
+def _per_task_mean(values: Tensor, mask: Mask) -> Tensor:
+    """values (B, T, D): mean over the real values of each task, then over the batch, as np_loss does
+    (so a task with many targets does not count more than one with few)."""
+    values = values.mean(-1)                                  # (B, T): per target, over the outputs
+    if mask is None:
+        return values.mean()
+    keep = (~mask).float()
+    return ((values * keep).sum(-1) / keep.sum(-1).clamp(min=1)).mean()
+
+
 def gaussian_nll(dist: Normal, y: Tensor, mask: Mask = None) -> Tensor:
-    """Predictive NLL per value of y (B, T, D) under dist (S, B, T, D), ignoring padding.
+    """Predictive NLL per value of y (B, T, D) under dist (S, B, T, D), ignoring padding, averaged per
+    task and then over the batch (the same aggregation as the training loss).
 
     The validation metric: it measures the predictions themselves, with no KL and no
     dependence on the KL weight, so it is comparable across epochs and runs.
     """
-    nll = -_float32(dist).log_prob(y.float().unsqueeze(0)).mean(0)  # (B, T, D)
-    if mask is None:
-        return nll.mean()
-    keep = (~mask).unsqueeze(-1).float()
-    return (nll * keep).sum() / (keep.sum() * nll.shape[-1]).clamp(min=1)
+    return _per_task_mean(-_float32(dist).log_prob(y.float().unsqueeze(0)).mean(0), mask)
 
 
 def masked_mse(dist: Normal, y: Tensor, mask: Mask = None) -> Tensor:
-    """Squared error of the predictive mean (averaged over samples) per value, ignoring padding."""
-    err = (dist.mean.float().mean(0) - y.float()) ** 2  # (B, T, D)
-    if mask is None:
-        return err.mean()
-    keep = (~mask).unsqueeze(-1).float()
-    return (err * keep).sum() / (keep.sum() * err.shape[-1]).clamp(min=1)
+    """Squared error of the predictive mean (averaged over samples) per value, ignoring padding, averaged
+    per task and then over the batch."""
+    return _per_task_mean((dist.mean.float().mean(0) - y.float()) ** 2, mask)
