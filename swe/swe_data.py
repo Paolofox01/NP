@@ -28,7 +28,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -41,7 +41,7 @@ from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 __all__ = ["VARIABLES", "X_LOW", "X_HIGH", "HISTORY_OPTIONS", "TARGET_RANGE", "SWEData", "prepare_data",
            "load_sensors", "spherical_to_cartesian", "make_train_loader", "make_random_batches",
-           "fixed_targets", "make_test_tasks", "build_cache", "load_cache"]
+           "fixed_targets", "make_test_tasks", "build_cache", "load_cache", "read_array"]
 
 VARIABLES = ["h", "u_theta", "u_phi"]
 X_LOW = [-1.0, -1.0, -1.0, -1.0]   # domain of x = (relative time, x, y, z)
@@ -57,15 +57,25 @@ DROP_SENSOR_OPTIONS = (0, 2, 5, 10)
 
 @dataclass
 class SWEData:
-    """Trajectories and everything the tasks need to be drawn from them."""
+    """Trajectories and everything the tasks need to be drawn from them.
 
-    trajectories: Dict[str, Tensor]   # split -> (trajectories, times, points, 3), standardized
-    coordinates: Tensor               # (points, 2): (theta, phi) of each point
-    y_mean: Tensor                    # (3,), to convert predictions back to physical units
-    y_std: Tensor                     # (3,)
+    The last fields describe the task distribution and have the PlanetSWE values by default; another
+    dataset (trl_data.py) sets its own."""
+
+    trajectories: Dict[str, Tensor]   # split -> (trajectories, times, points, variables), standardized
+    coordinates: Tensor               # (points, 2): (theta, phi) of each point, or (x, y) for geometry "plane"
+    y_mean: Tensor                    # (variables,), to convert predictions back to physical units
+    y_std: Tensor                     # (variables,)
     sensors: Tensor                   # (S,) indices of the sensor points
     stride: int                       # steps of the stored time axis between consecutive readings of a window
     target_weights: Tensor            # (points,) relative probability of each point as a target
+    geometry: str = "sphere"          # "sphere": positions are points on the unit sphere; "plane": (x, y) as they are
+    history_options: Tuple[int, ...] = HISTORY_OPTIONS        # numbers of past readings (lag) a task can use
+    drop_options: Tuple[int, ...] = DROP_SENSOR_OPTIONS       # numbers of sensors a task can drop
+    params: Optional[Dict[str, Tensor]] = None                # split -> (trajectories, n) a parameter of each
+                                                              # trajectory, given to the models as an input
+    x_low: List[float] = field(default_factory=lambda: list(X_LOW))     # domain of x, for the model's scaling
+    x_high: List[float] = field(default_factory=lambda: list(X_HIGH))
 
 
 # ----------------------------------------------------------------------------- loading
@@ -192,12 +202,13 @@ def load_sensors(coordinates: Tensor, path: Path = SENSOR_FILE, count: int = SEN
 # ----------------------------------------------------------------------------- tasks
 
 class _Windows(Dataset):
-    """One item per (trajectory, time t0): the max(HISTORY_OPTIONS) + 1 readings ending at t0, `stride`
-    steps of the stored time axis apart."""
+    """One item per (trajectory, time t0): the max(history_options) + 1 readings ending at t0, `stride`
+    steps of the stored time axis apart; with `params`, the item is (window, the trajectory's parameter)."""
 
-    def __init__(self, trajectories: Tensor, stride: int = STRIDE):
-        self.trajectories, self.stride = trajectories, stride
-        self.span = max(HISTORY_OPTIONS) * stride
+    def __init__(self, trajectories: Tensor, stride: int = STRIDE, history_options: Sequence[int] = HISTORY_OPTIONS,
+                 params: Optional[Tensor] = None):
+        self.trajectories, self.stride, self.params = trajectories, stride, params
+        self.span = max(history_options) * stride
         self.n_times = trajectories.shape[1] - self.span - 1
         if self.n_times <= 0:
             raise ValueError("trajectories are too short for the largest history option")
@@ -205,10 +216,16 @@ class _Windows(Dataset):
     def __len__(self) -> int:
         return self.trajectories.shape[0] * self.n_times
 
-    def __getitem__(self, index: int) -> Tensor:
+    def __getitem__(self, index: int):
         trajectory, t = divmod(index, self.n_times)
         t0 = t + self.span + 1
-        return self.trajectories[trajectory, t0 - self.span: t0 + 1: self.stride]   # a view, not a copy
+        window = self.trajectories[trajectory, t0 - self.span: t0 + 1: self.stride]   # a view, not a copy
+        return window if self.params is None else (window, self.params[trajectory])
+
+
+def _windows(data: "SWEData", split: str) -> _Windows:
+    params = None if data.params is None else data.params[split]
+    return _Windows(data.trajectories[split], data.stride, data.history_options, params)
 
 
 def _cell_area(coordinates: Tensor) -> Tensor:
@@ -216,21 +233,28 @@ def _cell_area(coordinates: Tensor) -> Tensor:
     return torch.sin(coordinates[:, 0]).clamp(min=1e-6)
 
 
+def _positions(coordinates: Tensor, geometry: str) -> Tensor:
+    """The position of points as the models get it: on the unit sphere, or (x, y) as they are."""
+    return spherical_to_cartesian(coordinates) if geometry == "sphere" else coordinates
+
+
 def _build_batch(windows: List[Tensor], coordinates: Tensor, sensors: Tensor, lags: List[int],
-                 active: Tensor, targets: List[Tensor]) -> Dict[str, Tensor]:
+                 active: Tensor, targets: List[Tensor], geometry: str = "sphere",
+                 params: Optional[Tensor] = None) -> Dict[str, Tensor]:
     """One task per window, each with its own lag, active sensors and targets.
 
-    windows: B tensors (readings, points, 3), the last reading being t0; lags: B ints (past readings used);
-    active: (B, S) bool; targets: B index tensors (of different lengths).
+    windows: B tensors (readings, points, variables), the last reading being t0; lags: B ints (past readings
+    used); active: (B, S) bool; targets: B index tensors (of different lengths); params: (B, n), a parameter
+    of each trajectory, put first in x (as `mu` is in pinball_data.py) and given to the baselines as "mu".
 
     The context is laid out on a (reading, sensor) grid of L = max(lag) + 1 rows ending at t0, so the
     readings of a task are its last lag + 1 rows; the rest, and dropped sensors, are padding.
     Besides the Neural Process inputs (x/y_context, x/y_target and the two masks), the task has what
-    the baselines need:
-      sensor_history (B, L, S, 3): the readings on that grid, 0 at padding;
+    the baselines need (V variables, P position coordinates):
+      sensor_history (B, L, S, V): the readings on that grid, 0 at padding;
       sensor_on (B, L, S): 1 for a real reading, 0 for padding (dropped sensor or before the lag);
       sensor_time (B, L, 1): relative time of each row;
-      sensor_position (B, S, 3): position of each sensor slot (also for dropped sensors);
+      sensor_position (B, S, P): position of each sensor slot (also for dropped sensors);
       target_index (B, T): grid point of each target (padding: the first target).
     """
     B, S = len(windows), len(sensors)
@@ -239,20 +263,25 @@ def _build_batch(windows: List[Tensor], coordinates: Tensor, sensors: Tensor, la
     offset = torch.arange(-(L - 1), 1)                                                 # (L,)
     on = (offset[None, :] >= -torch.as_tensor(lags)[:, None])[:, :, None] & active[:, None, :]   # (B, L, S)
     rel_time = offset.float() / last                                                   # (L,)
-    history = torch.stack([w[last - L + 1:][:, sensors] for w in windows])             # (B, L, S, 3)
+    history = torch.stack([w[last - L + 1:][:, sensors] for w in windows])             # (B, L, S, V)
 
-    sensor_xyz = spherical_to_cartesian(coordinates[sensors])                          # (S, 3)
+    sensor_pos = _positions(coordinates[sensors], geometry)                            # (S, P)
+    P = sensor_pos.shape[-1]
     x_context = torch.cat([rel_time.view(1, L, 1, 1).expand(B, L, S, 1),
-                           sensor_xyz.view(1, 1, S, 3).expand(B, L, S, 3)], dim=-1)
+                           sensor_pos.view(1, 1, S, P).expand(B, L, S, P)], dim=-1)
 
     n_targets = torch.as_tensor([len(t) for t in targets])
     T = int(n_targets.max())
     index = torch.stack([F.pad(t, (0, T - len(t)), value=int(t[0])) for t in targets])  # (B, T)
     target_mask = torch.arange(T)[None, :] >= n_targets[:, None]                       # (B, T)
-    x_target = torch.cat([torch.zeros(B, T, 1), spherical_to_cartesian(coordinates[index])], dim=-1)
-    y_target = torch.stack([w[last][i] for w, i in zip(windows, index)])               # (B, T, 3)
+    x_target = torch.cat([torch.zeros(B, T, 1), _positions(coordinates[index], geometry)], dim=-1)
+    y_target = torch.stack([w[last][i] for w, i in zip(windows, index)])               # (B, T, V)
+    if params is not None:
+        n = params.shape[-1]
+        x_context = torch.cat([params.view(B, 1, 1, n).expand(B, L, S, n), x_context], dim=-1)
+        x_target = torch.cat([params.unsqueeze(1).expand(B, T, n), x_target], dim=-1)
 
-    return {
+    task = {
         "x_context": x_context.reshape(B, L * S, -1),
         "y_context": history.reshape(B, L * S, -1),
         "context_mask": ~on.reshape(B, L * S),
@@ -262,27 +291,41 @@ def _build_batch(windows: List[Tensor], coordinates: Tensor, sensors: Tensor, la
         "sensor_history": history * on.unsqueeze(-1),
         "sensor_on": on.float(),
         "sensor_time": rel_time.view(1, L, 1).expand(B, L, 1).contiguous(),
-        "sensor_position": sensor_xyz.unsqueeze(0).expand(B, -1, -1).contiguous(),
+        "sensor_position": sensor_pos.unsqueeze(0).expand(B, -1, -1).contiguous(),
         "target_index": index,
     }
+    if params is not None:
+        task["mu"] = params
+    return task
 
 
-def _random_tasks(windows: List[Tensor], coordinates: Tensor, sensors: Tensor, weights: Tensor,
-                  target_range: Tuple[int, int] = TARGET_RANGE) -> Dict[str, Tensor]:
-    """Random tasks, drawn independently for every window: lag, dropped sensors, number of targets
-    (uniform in target_range) and which points (without replacement, with probability `weights`)."""
+def _random_tasks(items: list, coordinates: Tensor, sensors: Tensor, weights: Tensor,
+                  target_range: Tuple[int, int] = TARGET_RANGE, geometry: str = "sphere",
+                  history_options: Sequence[int] = HISTORY_OPTIONS,
+                  drop_options: Sequence[int] = DROP_SENSOR_OPTIONS) -> Dict[str, Tensor]:
+    """Random tasks, drawn independently for every item (a window, or (window, parameter)): lag, dropped
+    sensors, number of targets (uniform in target_range) and which points (without replacement, with
+    probability `weights`)."""
+    with_params = isinstance(items[0], tuple)
+    windows = [item[0] for item in items] if with_params else items
+    params = torch.stack([item[1] for item in items]) if with_params else None
     B, S = len(windows), len(sensors)
     n_available = int((weights > 0).sum())
-    lags = [HISTORY_OPTIONS[i] for i in torch.randint(len(HISTORY_OPTIONS), (B,)).tolist()]
+    lags = [history_options[i] for i in torch.randint(len(history_options), (B,)).tolist()]
 
-    drop_options = torch.as_tensor(DROP_SENSOR_OPTIONS)
-    n_drop = drop_options[torch.randint(len(drop_options), (B,))]
+    drop = torch.as_tensor(drop_options)
+    n_drop = drop[torch.randint(len(drop), (B,))]
     rank = torch.rand(B, S).argsort(dim=1).argsort(dim=1)                              # random order
     active = rank >= n_drop[:, None]                                                   # (B, S)
 
     n_targets = torch.randint(target_range[0], target_range[1] + 1, (B,)).clamp(max=n_available)
     targets = [torch.multinomial(weights, int(n), replacement=False) for n in n_targets]
-    return _build_batch(windows, coordinates, sensors, lags, active, targets)
+    return _build_batch(windows, coordinates, sensors, lags, active, targets, geometry, params)
+
+
+def _task_settings(data: "SWEData") -> dict:
+    return dict(coordinates=data.coordinates, sensors=data.sensors, weights=data.target_weights,
+                geometry=data.geometry, history_options=data.history_options, drop_options=data.drop_options)
 
 
 def make_train_loader(data: SWEData, steps_per_epoch: int, batch_size: int = 16, num_workers: int = 4,
@@ -294,12 +337,11 @@ def make_train_loader(data: SWEData, steps_per_epoch: int, batch_size: int = 16,
     them, which for PlanetSWE can be slow and memory-hungry: if the first epoch is slow to start
     or memory runs out, use num_workers=0.
     """
-    windows = _Windows(data.trajectories["train"], data.stride)
+    windows = _windows(data, "train")
     return DataLoader(
         windows, batch_size=batch_size,
         sampler=RandomSampler(windows, replacement=True, num_samples=steps_per_epoch * batch_size),
-        collate_fn=partial(_random_tasks, coordinates=data.coordinates, sensors=data.sensors,
-                           weights=data.target_weights, target_range=target_range),
+        collate_fn=partial(_random_tasks, target_range=target_range, **_task_settings(data)),
         num_workers=num_workers, pin_memory=torch.cuda.is_available(),
         persistent_workers=num_workers > 0,
     )
@@ -313,14 +355,14 @@ def make_random_batches(data: SWEData, split: str, n_batches: int, batch_size: i
     Used for validation and for the random-task test set: every evaluation then runs on exactly the
     same tasks, so changes in a metric come from the model, not from which tasks happened to be drawn.
     """
-    windows = _Windows(data.trajectories[split], data.stride)
+    windows = _windows(data, split)
     generator = torch.Generator().manual_seed(seed)
     state = torch.get_rng_state()
     torch.manual_seed(seed)  # the tasks draw from the global generator
     try:
         indices = torch.randint(len(windows), (n_batches, batch_size), generator=generator)
-        return [_random_tasks([windows[i] for i in batch.tolist()], data.coordinates, data.sensors,
-                              data.target_weights, target_range) for batch in indices]
+        return [_random_tasks([windows[i] for i in batch.tolist()], target_range=target_range,
+                              **_task_settings(data)) for batch in indices]
     finally:
         torch.set_rng_state(state)
 
@@ -336,10 +378,15 @@ def fixed_targets(data: SWEData, n_points: int, seed: int = 0) -> Tensor:
 def make_test_tasks(data: SWEData, lag: int, targets: Tensor) -> List[Dict[str, Tensor]]:
     """Given lag and targets: one task per test trajectory, at the last time of the trajectory, with all
     the sensors active (each task is a batch of one: no padding)."""
-    windows = _Windows(data.trajectories["test"], data.stride)
+    windows = _windows(data, "test")
     all_active = torch.ones(1, len(data.sensors), dtype=torch.bool)
-    return [_build_batch([windows[k * windows.n_times + windows.n_times - 1]], data.coordinates, data.sensors,
-                         [lag], all_active, [targets]) for k in range(data.trajectories["test"].shape[0])]
+    tasks = []
+    for k in range(data.trajectories["test"].shape[0]):
+        item = windows[k * windows.n_times + windows.n_times - 1]
+        window, params = item if isinstance(item, tuple) else (item, None)
+        tasks.append(_build_batch([window], data.coordinates, data.sensors, [lag], all_active, [targets],
+                                  data.geometry, None if params is None else params.unsqueeze(0)))
+    return tasks
 
 
 # ----------------------------------------------------------------------------- streamed cache
@@ -381,6 +428,49 @@ class _RangeReader:
     def close(self):
         if self.file is not None:
             self.file.close()
+
+
+def array_info(fs, path: str, names: Sequence[str]) -> Dict[str, tuple]:
+    """(shape, dtype, byte offset) of datasets of an HDF5 file; the offset is None unless the dataset is one
+    contiguous, uncompressed block of the file (as The Well's files store their fields)."""
+    import h5py
+
+    with fs.open(path, "rb", block_size=2 ** 20) as f, h5py.File(f, "r") as h:
+        info = {}
+        for name in names:
+            dataset = h[name]
+            contiguous = dataset.chunks is None and dataset.compression is None
+            info[name] = (dataset.shape, dataset.dtype, dataset.id.get_offset() if contiguous else None)
+        return info
+
+
+def read_array(fs, path: str, name: str, info: tuple, out: Optional[np.ndarray] = None,
+               piece: int = 64 * 2 ** 20) -> np.ndarray:
+    """A whole dataset of an HDF5 file, with the (shape, dtype, offset) of array_info.
+
+    A contiguous dataset is read as byte ranges of `piece` bytes (each retried if it fails), straight into
+    `out` if given (a C-contiguous array of the right shape and dtype), which is much faster over the network
+    than h5py's small reads. Any other layout is read through h5py."""
+    shape, dtype, offset = info
+    if offset is None:
+        import h5py
+        with fs.open(path, "rb", block_size=2 ** 20) as f, h5py.File(f, "r") as h:
+            values = h[name][...]
+        if out is not None:
+            out[...] = values
+            return out
+        return values
+    if out is None:
+        out = np.empty(shape, dtype=dtype)
+    flat = out.reshape(-1).view(np.uint8)
+    reader = _RangeReader(fs, path)
+    try:
+        for start in range(0, flat.size, piece):
+            stop = min(start + piece, flat.size)
+            flat[start:stop] = np.frombuffer(reader.read(offset + start, stop - start), dtype=np.uint8)
+    finally:
+        reader.close()
+    return out
 
 
 def _read_trajectory(fs, path: str, frames: np.ndarray, points: np.ndarray) -> np.ndarray:
