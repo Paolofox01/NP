@@ -45,7 +45,7 @@ from torch import Tensor
 from layers import FourierFeatures, MultiheadAttention, TransformerBlock, inverse_softplus
 from models.base import InputScaler
 
-__all__ = ["SensorLSTM", "SensorTransformer", "make_sensor_encoder", "SHRED", "DeepONet",
+__all__ = ["SensorMLP", "SensorLSTM", "SensorTransformer", "make_sensor_encoder", "SHRED", "DeepONet",
            "SineCosineEncoding", "Senseiver"]
 
 Batch = Dict[str, Tensor]
@@ -64,6 +64,24 @@ def _sensor_steps(batch: Batch) -> Tensor:
     position = batch["sensor_position"].reshape(B, 1, -1).expand(B, L, -1)     # (B, L, S * P)
     return torch.cat([history.reshape(B, L, S * V), on, position, batch["sensor_time"]], dim=-1)
 
+class SensorMLP(nn.Module):
+    """Classic MLP branch over the current sensor readings at t0 (the last step, (B, hidden))."""
+
+    def __init__(self, n_sensors: int, hidden_size: int, num_layers: int = 2, dropout: float = 0.1,
+                 y_dim: int = 1, pos_dim: int = 2):
+        super().__init__()
+        self.out_dim = hidden_size
+        in_dim = n_sensors * (y_dim + 1 + pos_dim) + 1
+        self.mlp = _mlp([in_dim] + [hidden_size] * num_layers, dropout=dropout)
+        self.act = nn.ReLU()
+
+    def forward(self, batch: Batch) -> Tensor:
+        return self.act(self.mlp(_sensor_steps(batch)[:, -1]))
+
+    def tokens(self, batch: Batch) -> Tuple[Tensor, Tensor]:
+        """Per-step MLP embeddings (B, L, hidden) and padding mask (B, L)."""
+        out = self.act(self.mlp(_sensor_steps(batch)))
+        return out, batch["sensor_on"].sum(-1) == 0
 
 class SensorLSTM(nn.Module):
     """LSTM over the sensor history; returns the last hidden state of the top layer (B, hidden)."""
@@ -119,12 +137,14 @@ class SensorTransformer(nn.Module):
 
 def make_sensor_encoder(kind: str, n_sensors: int, hidden_size: int, num_layers: int,
                         dropout: float, num_heads: int, y_dim: int = 1, pos_dim: int = 2) -> nn.Module:
+    if kind == "mlp":
+        return SensorMLP(n_sensors, hidden_size, num_layers, dropout, y_dim, pos_dim)
     if kind == "lstm":
         return SensorLSTM(n_sensors, hidden_size, num_layers, dropout, y_dim, pos_dim)
     if kind == "transformer":
         return SensorTransformer(n_sensors, hidden_size, num_layers, dropout, num_heads,
                                  y_dim=y_dim, pos_dim=pos_dim)
-    raise ValueError(f"encoder must be 'lstm' or 'transformer', got {kind!r}")
+    raise ValueError(f"encoder must be 'mlp', 'lstm' or 'transformer', got {kind!r}")
 
 
 def _mlp(sizes: Sequence[int], dropout: float = 0.0) -> nn.Sequential:
@@ -142,33 +162,51 @@ def _mlp(sizes: Sequence[int], dropout: float = 0.0) -> nn.Sequential:
 # ----------------------------------------------------------------------------- models
 
 class SHRED(nn.Module):
-    """SHallow REcurrent Decoder: sensor history -> encoder -> shallow MLP -> the whole field.
-
-    Original sizes: LSTM 64 x 2 layers, decoder 350 -> 400, dropout 0.1. With
-    encoder="transformer" the LSTM is replaced by a SensorTransformer of the same width and depth.
-    The field is predicted at every mesh node; the loss only uses the nodes of the task's targets.
-    """
+    """SHallow REcurrent Decoder: sensor history -> encoder -> shallow MLP -> field (full or via POD modes)."""
 
     probabilistic = False
 
     def __init__(self, n_sensors: int, n_nodes: int, n_params: int = 0, encoder: str = "lstm",
                  hidden_size: int = 64, num_layers: int = 2, num_heads: int = 4,
-                 decoder_sizes: Sequence[int] = (350, 400), dropout: float = 0.1):
+                 decoder_sizes: Sequence[int] = (350, 400), dropout: float = 0.1,
+                 y_dim: int = 1, pos_dim: int = 2,
+                 pod_basis: Optional[Tensor] = None, pod_mean: Optional[Tensor] = None):
         super().__init__()
+        n_modes = pod_basis.shape[-1] if pod_basis is not None else None
         self.kwargs = dict(n_sensors=n_sensors, n_nodes=n_nodes, n_params=n_params, encoder=encoder,
                            hidden_size=hidden_size, num_layers=num_layers, num_heads=num_heads,
-                           decoder_sizes=list(decoder_sizes), dropout=dropout)
-        self.encoder = make_sensor_encoder(encoder, n_sensors, hidden_size, num_layers, dropout, num_heads)
-        self.decoder = _mlp([hidden_size + n_params, *decoder_sizes, n_nodes], dropout)
-        self.n_params = n_params
+                           decoder_sizes=list(decoder_sizes), dropout=dropout,
+                           y_dim=y_dim, pos_dim=pos_dim, n_modes=n_modes)
+        self.encoder = make_sensor_encoder(encoder, n_sensors, hidden_size, num_layers, dropout, num_heads,
+                                           y_dim=y_dim, pos_dim=pos_dim)
+        out_dim = n_modes if n_modes is not None else n_nodes * y_dim
+        self.decoder = _mlp([hidden_size + n_params, *decoder_sizes, out_dim], dropout)
+        self.n_params, self.n_nodes, self.y_dim = n_params, n_nodes, y_dim
+
+        # Registra la base POD (n_nodes, y_dim, K) e la media (n_nodes, y_dim) come buffer non addestrabili
+        self.register_buffer("pod_basis", pod_basis)
+        self.register_buffer("pod_mean", pod_mean)
 
     def forward(self, batch: Batch) -> Prediction:
         h = self.encoder(batch)
         if self.n_params:
             h = torch.cat([h, batch["mu"]], dim=-1)
-        field = self.decoder(h)                                            # (B, n_nodes)
-        return field.gather(1, batch["target_index"]), None
+        coeffs = self.decoder(h)                                           # (B, K) oppure (B, n_nodes * y_dim)
 
+        if self.pod_basis is not None:
+            idx = batch["target_index"]                                    # (B, T)
+            # Estrae la base POD solo nei punti target del batch: (B, T, y_dim, K)
+            basis_t = self.pod_basis[idx]
+            pred = torch.einsum("btyk,bk->bty", basis_t, coeffs)
+            if self.pod_mean is not None:
+                pred = pred + self.pod_mean[idx]
+            return (pred.squeeze(-1) if self.y_dim == 1 else pred), None
+
+        if self.y_dim == 1:
+            return coeffs.gather(1, batch["target_index"]), None
+        field = coeffs.view(-1, self.n_nodes, self.y_dim)
+        idx = batch["target_index"].unsqueeze(-1).expand(-1, -1, self.y_dim)
+        return field.gather(1, idx), None
 
 class DeepONet(nn.Module):
     """DeepONet with a sequence-encoder branch.
