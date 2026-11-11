@@ -46,7 +46,7 @@ from layers import FourierFeatures, MultiheadAttention, TransformerBlock, invers
 from models.base import InputScaler
 
 __all__ = ["SensorMLP", "SensorLSTM", "SensorTransformer", "make_sensor_encoder", "SHRED", "DeepONet",
-           "SineCosineEncoding", "Senseiver"]
+           "SineCosineEncoding", "Senseiver", "ExponentialGP"]
 
 Batch = Dict[str, Tensor]
 Prediction = Tuple[Tensor, Optional[Tensor]]
@@ -391,3 +391,82 @@ class Senseiver(nn.Module):
             mean = mean.squeeze(-1)
             var = var.squeeze(-1) if var is not None else None
         return mean, var
+
+# ----------------------------------------------------------------------------- Gaussian Process
+
+class ExponentialGP(nn.Module):
+    """Exact Gaussian Process Regression with an anisotropic exponential (Laplace / Matern 1/2) kernel:
+        k(x, x') = sigma_f^2 * exp( - || (x - x') / l ||_2 )
+    Learns per-channel lengthscales (one per input coordinate in x_dim), signal variance, and noise
+    variance via gradient descent in train_baseline, and handles padded batches via context_mask.
+    """
+
+    probabilistic = True
+
+    def __init__(self, x_dim: int, y_dim: int = 1, init_lengthscale: float = 0.5,
+                 init_var: float = 1.0, init_noise: float = 0.05, min_var: float = 1e-4):
+        super().__init__()
+        self.kwargs = dict(x_dim=x_dim, y_dim=y_dim, init_lengthscale=init_lengthscale,
+                           init_var=init_var, init_noise=init_noise, min_var=min_var)
+        self.x_dim, self.y_dim, self.min_var = x_dim, y_dim, min_var
+
+        self.raw_lengthscale = nn.Parameter(
+            torch.full((y_dim, x_dim), float(inverse_softplus(init_lengthscale)))
+        )
+        self.raw_var = nn.Parameter(
+            torch.full((y_dim,), float(inverse_softplus(init_var)))
+        )
+        self.raw_noise = nn.Parameter(
+            torch.full((y_dim,), float(inverse_softplus(max(init_noise - min_var, 1e-4))))
+        )
+
+    def _hyperparams(self) -> Tuple[Tensor, Tensor, Tensor]:
+        lengthscale = F.softplus(self.raw_lengthscale).clamp(min=1e-3)     # (V, D)
+        var = F.softplus(self.raw_var).clamp(min=1e-4)                     # (V,)
+        noise = self.min_var + F.softplus(self.raw_noise)                  # (V,)
+        return lengthscale, var, noise
+
+    def _kernel(self, x1: Tensor, x2: Tensor, lengthscale: Tensor, var: Tensor) -> Tensor:
+        """x1: (B, N1, D), x2: (B, N2, D) -> (B, V, N1, N2)."""
+        scale = lengthscale.unsqueeze(0).unsqueeze(2)                      # (1, V, 1, D)
+        x1_s = x1.unsqueeze(1) / scale                                     # (B, V, N1, D)
+        x2_s = x2.unsqueeze(1) / scale                                     # (B, V, N2, D)
+        dist = torch.cdist(x1_s, x2_s, p=2.0)                              # (B, V, N1, N2)
+        return var.view(1, -1, 1, 1) * torch.exp(-dist)
+
+    def forward(self, batch: Batch) -> Prediction:
+        x_c, y_c = batch["x_context"], batch["y_context"]                  # (B, N_c, D), (B, N_c, V)
+        x_t = batch["x_target"]                                            # (B, T, D)
+        if y_c.ndim == 2:
+            y_c = y_c.unsqueeze(-1)
+        B, N_c, _ = x_c.shape
+
+        lengthscale, var, noise = self._hyperparams()
+        K_cc = self._kernel(x_c, x_c, lengthscale, var)                    # (B, V, N_c, N_c)
+        K_ct = self._kernel(x_c, x_t, lengthscale, var)                    # (B, V, N_c, T)
+
+        eye = torch.eye(N_c, device=x_c.device, dtype=x_c.dtype).view(1, 1, N_c, N_c)
+        K_y = K_cc + noise.view(1, -1, 1, 1) * eye
+
+        y_v = y_c.permute(0, 2, 1).unsqueeze(-1)                           # (B, V, N_c, 1)
+
+        # Mask out padded context points so they have zero influence on Cholesky and predictions
+        mask = batch.get("context_mask")                                   # (B, N_c), True = padding
+        if mask is not None and mask.any():
+            valid = ~mask                                                  # (B, N_c)
+            valid_2d = (valid.unsqueeze(2) & valid.unsqueeze(1)).unsqueeze(1)  # (B, 1, N_c, N_c)
+            K_y = torch.where(valid_2d, K_y, eye.expand_as(K_y))
+            K_ct = K_ct * valid.view(B, 1, N_c, 1)
+            y_v = y_v * valid.view(B, 1, N_c, 1)
+
+        L = torch.linalg.cholesky(K_y)                                     # (B, V, N_c, N_c)
+        alpha = torch.cholesky_solve(y_v, L)                               # (B, V, N_c, 1)
+        mean = torch.matmul(K_ct.transpose(-2, -1), alpha).squeeze(-1).permute(0, 2, 1)  # (B, T, V)
+
+        v = torch.linalg.solve_triangular(L, K_ct, upper=False)            # (B, V, N_c, T)
+        pred_var = (var.view(1, -1, 1) - (v ** 2).sum(dim=2) + noise.view(1, -1, 1)).permute(0, 2, 1)
+        pred_var = pred_var.clamp(min=self.min_var)                        # (B, T, V)
+
+        if self.y_dim == 1:
+            return mean.squeeze(-1), pred_var.squeeze(-1)
+        return mean, pred_var
