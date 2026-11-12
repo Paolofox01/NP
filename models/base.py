@@ -60,8 +60,9 @@ class NPConfig:
     # Latent variable
     use_latent: bool = True            # False: conditional NP (no z; loss = NLL only)
     pooling: str = "mean"              # how the context gives q(z): "mean", "attention" or "bayesian"
-                                       # "attention": cross-attention with one learned query (PMA);
+                                       # "attention": cross-attention with learned queries (PMA);
                                        # "bayesian": precision-weighted Gaussian update (Volpp et al.)
+    n_latent_slots: int = 1            # K slots for pooling: (1, K, r_dim) queries or K channel groups
     posterior_max_targets: Optional[int] = None
     min_latent_var: float = 1e-4
 
@@ -113,15 +114,7 @@ Bounds = Union[float, Sequence[float], Tensor]
 
 
 class InputScaler(nn.Module):
-    """Maps x from the box [low, high] (per dimension) to [-1, 1].
-
-    The bounds are buffers: not trained, but saved in the state_dict, so a loaded model
-    normalizes exactly as it did in training. Use the physical domain bounds (box size,
-    time span), not statistics of a data sample.
-
-    Warns once if a scaled value falls outside [-tolerance, tolerance], which means either
-    the bounds were never set or the input lies outside the training domain.
-    """
+    """Maps x from the box [low, high] (per dimension) to [-1, 1]."""
 
     def __init__(self, dim: int, low: Bounds = -1.0, high: Bounds = 1.0, tolerance: float = 1.5):
         super().__init__()
@@ -185,12 +178,7 @@ class XFeaturizer(nn.Module):
 
 
 class XEncoder(nn.Module):
-    """Shared coordinate embedding e(x): [Fourier features] -> MLP, (..., x_dim) -> (..., r_dim).
-
-    Expects x already scaled to [-1, 1] (done by the model's x_scaler).
-
-    Computed once per point and reused by the (x, y) encoder, the attention and the decoder.
-    """
+    """Shared coordinate embedding e(x): [Fourier features] -> MLP, (..., x_dim) -> (..., r_dim)."""
 
     def __init__(self, cfg: NPConfig):
         super().__init__()
@@ -200,18 +188,19 @@ class XEncoder(nn.Module):
         self.featurizer = XFeaturizer(cfg)
         self.mlp = MLP(self.featurizer.out_dim, cfg.r_dim, hidden_dim=cfg.hidden_dim,
                        n_hidden=cfg.n_hidden, activation=cfg.activation, norm=cfg.norm,
-                       norm_position="post")  # post-norm: LayerNorm on raw coordinates is meaningless
+                       norm_position="post")
 
     def forward(self, x: Tensor) -> Tensor:
         return self.mlp(self.featurizer(x))
 
 
 class LatentEncoder(nn.Module):
-    """Pooled representation (B, r_dim) -> Normal over z, (B, z_dim)."""
+    """Pooled representation (B, n_latent_slots * r_dim) -> Normal over z, (B, z_dim)."""
 
     def __init__(self, cfg: NPConfig):
         super().__init__()
-        self.net = MLP(cfg.r_dim, 2 * cfg.z_dim, hidden_dim=cfg.hidden_dim, n_hidden=cfg.n_hidden,
+        in_dim = cfg.n_latent_slots * cfg.r_dim
+        self.net = MLP(in_dim, 2 * cfg.z_dim, hidden_dim=cfg.hidden_dim, n_hidden=cfg.n_hidden,
                        activation=cfg.activation, norm=cfg.norm)
         self.min_var = cfg.min_latent_var
         with torch.no_grad():  # start with unit variance
@@ -225,55 +214,40 @@ class LatentEncoder(nn.Module):
 
 class BayesianAggregation(nn.Module):
     """Bayesian context aggregation (Volpp et al., ICLR 2021): point set (B, N, r_dim) -> Normal over z.
-
-    Every point gives an observation of z, r_i, with its own uncertainty sigma_i^2 (both learned from
-    the point's representation). Starting from a learned Gaussian prior N(mu_0, sigma_0^2), they are
-    combined like a Kalman / Gaussian update, per dimension of z:
-        1 / sigma_z^2 = 1 / sigma_0^2 + sum_i 1 / sigma_i^2
-        mu_z          = mu_0 + sigma_z^2 * sum_i (r_i - mu_0) / sigma_i^2
-    Points the model finds unreliable (large sigma_i) count less, and more informative points make
-    q(z) narrower, which a mean or an attention pooling cannot express. Padded points are ignored.
-    """
+    With n_latent_slots = K > 1, performs K independent Gaussian updates and projects to (B, z_dim)."""
 
     def __init__(self, cfg: NPConfig, init_point_var: float = 10.0):
         super().__init__()
-        self.net = MLP(cfg.r_dim, 2 * cfg.z_dim, hidden_dim=cfg.hidden_dim, n_hidden=cfg.n_hidden,
+        self.k = cfg.n_latent_slots
+        slot_dim = self.k * cfg.z_dim
+        self.net = MLP(cfg.r_dim, 2 * slot_dim, hidden_dim=cfg.hidden_dim, n_hidden=cfg.n_hidden,
                        activation=cfg.activation, norm=cfg.norm)
         self.min_var = cfg.min_latent_var
-        self.prior_mean = nn.Parameter(torch.zeros(cfg.z_dim))
-        self.prior_raw_var = nn.Parameter(torch.full((cfg.z_dim,), inverse_softplus(1.0)))
+        self.prior_mean = nn.Parameter(torch.zeros(slot_dim))
+        self.prior_raw_var = nn.Parameter(torch.full((slot_dim,), inverse_softplus(1.0)))
+        self.post_proj = nn.Linear(2 * slot_dim, 2 * cfg.z_dim) if self.k > 1 else None
         with torch.no_grad():  # points start uninformative (large variance), so q(z) starts wide
-            self.net.head.weight[cfg.z_dim:].mul_(0.1)
-            self.net.head.bias[cfg.z_dim:].fill_(inverse_softplus(init_point_var))
+            self.net.head.weight[slot_dim:].mul_(0.1)
+            self.net.head.bias[slot_dim:].fill_(inverse_softplus(init_point_var))
 
     def forward(self, points: Tensor, mask: Mask = None) -> Normal:
-        r, raw = self.net(points).chunk(2, dim=-1)                           # (B, N, z_dim) each
+        r, raw = self.net(points).chunk(2, dim=-1)                           # (B, N, K * z_dim) each
         precision = 1.0 / (self.min_var + F.softplus(raw))                  # 1 / sigma_i^2
         if mask is not None:
             precision = precision.masked_fill(mask.unsqueeze(-1), 0.0)      # padding adds nothing
         prior_var = self.min_var + F.softplus(self.prior_raw_var)
-        var = 1.0 / (1.0 / prior_var + precision.sum(dim=1))                 # (B, z_dim)
+        var = 1.0 / (1.0 / prior_var + precision.sum(dim=1))                 # (B, K * z_dim)
         mean = self.prior_mean + var * (precision * (r - self.prior_mean)).sum(dim=1)
+        if self.post_proj is not None:
+            mean, raw_z = self.post_proj(torch.cat([mean, var.log()], dim=-1)).chunk(2, dim=-1)
+            var = self.min_var + F.softplus(raw_z)
         return Normal(mean, var.clamp(min=self.min_var).sqrt())
 
 
 # ----------------------------------------------------------------------------- base model
 
 class NeuralProcess(nn.Module, ABC):
-    """Neural Process skeleton.
-
-    Pipeline (x is given in physical units and scaled to [-1, 1] first):
-        x                       -> x_encoder           -> e(x)  (B, N, r_dim)
-        (e(x), y) per point     -> encode_points       -> s_i   (B, N, r_dim)
-        context points          -> summarize           -> the context representation
-        pool(summary)           -> latent encoder      -> q(z)       (only with use_latent)
-        summary, e(x_target)    -> deterministic_path  -> r     (B, T, r_dim)
-        [z, r, e(x_t), x_t]     -> decoder             -> p(y)       (no z without use_latent)
-
-    Subclasses implement `deterministic_path` and may extend `encode_points`, or replace
-    `summarize` / `pool` when the context representation is not one vector per point
-    (e.g. a set of learned latents, or one set per Transformer block).
-    """
+    """Neural Process skeleton."""
 
     def __init__(self, cfg: NPConfig):
         super().__init__()
@@ -289,11 +263,20 @@ class NeuralProcess(nn.Module, ABC):
         bayesian = cfg.use_latent and cfg.pooling == "bayesian"
         self.latent_encoder = LatentEncoder(cfg) if cfg.use_latent and not bayesian else None
         self.bayesian_aggregation = BayesianAggregation(cfg) if bayesian else None
+
         if cfg.use_latent and cfg.pooling == "attention":
-            # Pooling by multihead attention (Set Transformer, Lee et al., 2019): a learned query reads
-            # the point set; each head is its own learned weighted average of the points.
-            self.pool_query = nn.Parameter(torch.randn(1, 1, cfg.r_dim) * 0.02)
+            # K = n_latent_slots learned queries of shape (1, K, r_dim)
+            self.pool_query = nn.Parameter(torch.randn(1, cfg.n_latent_slots, cfg.r_dim) * 0.02)
             self.pool_attention = MultiheadAttention(cfg.r_dim, cfg.num_heads, cfg.dropout)
+        elif cfg.use_latent and cfg.pooling == "mean":
+            if cfg.n_latent_slots > 1:
+                self.mean_pre_proj = nn.Sequential(
+                    nn.Linear(cfg.r_dim, cfg.n_latent_slots * cfg.r_dim),
+                    cfg.activation(),
+                )
+            else:
+                self.mean_pre_proj = nn.Identity()
+
         self.decoder = GaussianDecoder(
             (cfg.z_dim if cfg.use_latent else 0) + 2 * cfg.r_dim + cfg.x_dim, cfg.y_dim,
             output_groups=cfg.output_groups,
@@ -316,7 +299,7 @@ class NeuralProcess(nn.Module, ABC):
         return summary
 
     def pool(self, summary: Tensor, mask: Mask = None) -> Tensor:
-        """Summary -> one vector (B, r_dim), the input of the latent encoder."""
+        """Summary -> one vector (B, n_latent_slots * r_dim), the input of the latent encoder."""
         return self.aggregate(self.pool_points(summary), mask)
 
     def latent_distribution(self, summary: Tensor, mask: Mask = None) -> Normal:
@@ -326,12 +309,12 @@ class NeuralProcess(nn.Module, ABC):
         return self.latent_encoder(self.pool(summary, mask))
 
     def aggregate(self, points: Tensor, mask: Mask = None) -> Tensor:
-        """A point set (B, N, r_dim) -> one vector (B, r_dim), as set by cfg.pooling: the mean, or
-        cross-attention with a learned query. Padded points are ignored either way."""
+        """A point set (B, N, r_dim) -> one vector (B, n_latent_slots * r_dim), as set by cfg.pooling."""
         if self.cfg.pooling == "attention":
-            query = self.pool_query.expand(points.shape[0], -1, -1)
-            return self.pool_attention(query, points, points, key_padding_mask=mask)[:, 0]
-        return masked_mean(points, mask)
+            query = self.pool_query.expand(points.shape[0], -1, -1)          # (B, K, r_dim)
+            out = self.pool_attention(query, points, points, key_padding_mask=mask)  # (B, K, r_dim)
+            return out.flatten(start_dim=1)                                  # (B, K * r_dim)
+        return masked_mean(self.mean_pre_proj(points), mask)                 # (B, K * r_dim)
 
     @abstractmethod
     def deterministic_path(self, ex_context: Tensor, s_context: Tensor, ex_target: Tensor,
@@ -353,13 +336,6 @@ class NeuralProcess(nn.Module, ABC):
         target_mask: Mask = None,
         use_posterior: Optional[bool] = None,
     ) -> NPOutput:
-        """Predict y at x_target given the context.
-
-        use_posterior: sample z from q(z | context ∪ target) instead of q(z | context).
-            None (default) means "in training mode, if y_target is given", which is what
-            the ELBO needs and keeps validation from ever seeing y_target.
-            Ignored without a latent (use_latent=False): y_target is then never used.
-        """
         x_context = self.x_scaler(x_context, context_mask)
         x_target = self.x_scaler(x_target, target_mask)
         ex_c, ex_t = self.x_encoder(x_context), self.x_encoder(x_target)
@@ -400,13 +376,6 @@ class NeuralProcess(nn.Module, ABC):
 
     def _decode(self, z: Optional[Tensor], r_t: Tensor, ex_t: Tensor, x_t: Tensor,
                 num_samples: int) -> Normal:
-        """z (S, B, z_dim) or None, r_t and ex_t (B, T, r_dim), x_t (B, T, x_dim)
-        -> p(y), (S, B, T, y_dim).
-
-        The raw x_t is passed too, so the exact position is never lost in the embedding.
-        Without a latent the prediction is computed once and repeated over the S samples
-        (an expanded view, no extra cost).
-        """
         per_point = torch.cat([r_t, ex_t, x_t], dim=-1)
         if z is None:
             mean, var = self.decoder(per_point)                        # (B, T, y_dim)
