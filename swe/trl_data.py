@@ -34,8 +34,6 @@ DATASET = "turbulent_radiative_layer_2D"
 VARIABLES = ["density", "pressure", "velocity_x", "velocity_y"]
 HISTORY_OPTIONS = (1,)             # past readings (lag) a task can use; the readings are consecutive time steps
 DROP_SENSOR_OPTIONS = (0, 1, 2, 5)  # sensors a task can drop, out of SENSOR_GRID[0] * SENSOR_GRID[1] = 10
-SENSOR_GRID = (5, 2)               # sensors along x, and rows along y
-SENSOR_Y_FRACTION = (1 / 3, 1 / 2)  # where the sensor rows lie, as fractions of the domain height y in [-1, 2]
 X_RANGE, Y_RANGE = (-0.5, 0.5), (-1.0, 2.0)
 
 
@@ -47,17 +45,34 @@ def _root(base_path) -> str:
         return str(Path(base) / "datasets")
     return base
 
+SENSOR_GRID = (8, 3)                 # 24 sensors: 8 per row x 3 staggered rows
+SENSOR_Y_FRACTION = (0.20, 0.68)     # y in [-0.40, 1.04] -> rows at y = -0.16, 0.32, 0.80
 
-def _sensor_points(x: Tensor, y: Tensor, grid: Tuple[int, int], y_fraction: Tuple[float, float]) -> Tensor:
-    """Flat grid indices (x-major) of the grid points closest to a lattice of sensors: `grid[0]` positions along
-    the periodic x axis, `grid[1]` rows between the two fractions of the height of the domain."""
+
+def _sensor_points(
+    x: Tensor,
+    y: Tensor,
+    grid: Tuple[int, int],
+    y_fraction: Tuple[float, float],
+    stagger: bool = True,
+) -> Tensor:
+    """Flat grid indices (x-major) of sensors on a periodically staggered lattice."""
     n_x, n_rows = grid
-    sensor_x = X_RANGE[0] + (torch.arange(n_x) + 0.5) / n_x * (X_RANGE[1] - X_RANGE[0])
+    x_span = X_RANGE[1] - X_RANGE[0]
+    dx = x_span / n_x
+
     low, high = (Y_RANGE[0] + f * (Y_RANGE[1] - Y_RANGE[0]) for f in y_fraction)
     sensor_y = low + (torch.arange(n_rows) + 0.5) / n_rows * (high - low)
-    ix = (x[None, :] - sensor_x[:, None]).abs().argmin(dim=1)
-    iy = (y[None, :] - sensor_y[:, None]).abs().argmin(dim=1)
-    points = (ix[:, None] * len(y) + iy[None, :]).reshape(-1)
+    iy = (y[None, :] - sensor_y[:, None]).abs().argmin(dim=1)  # (n_rows,)
+
+    points = []
+    for r in range(n_rows):
+        offset = (r + 0.5) / n_rows if stagger else 0.5
+        sensor_x = X_RANGE[0] + ((torch.arange(n_x) + offset) * dx) % x_span
+        ix = (x[None, :] - sensor_x[:, None]).abs().argmin(dim=1)
+        points.append(ix * len(y) + iy[r])
+
+    points = torch.cat(points)
     if points.unique().numel() != len(points):
         raise ValueError("could not place the sensors on distinct grid points")
     return points.sort().values
