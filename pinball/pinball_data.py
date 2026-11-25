@@ -36,7 +36,7 @@ N_TRAJECTORIES = 500
 N_TIMES = 31                       # T = 3.0, dt = 0.1
 MAX_LAG = 19                       # up to MAX_LAG past readings (MAX_LAG + 1 readings in all)
 MIN_TIME = 20                      # t0 = MIN_TIME ... N_TIMES - 1, so the longest lag fits
-TARGET_RANGE = (0, 512)        # random target nodes per task, active sensors excluded
+TARGET_RANGE = (16, 128)        # random target nodes per task, active sensors excluded
 DROP_SENSOR_OPTIONS = (0, 1)       # how many sensors a random task drops
 
 
