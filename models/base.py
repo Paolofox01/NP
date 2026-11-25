@@ -266,11 +266,9 @@ class NeuralProcess(nn.Module, ABC):
 
         if cfg.use_latent and cfg.pooling == "attention":
             # K = n_latent_slots learned queries of shape (1, K, r_dim)
-            self.pool_query = nn.Parameter(torch.randn(1, cfg.n_latent_slots, cfg.r_dim) * 0.02)
-            self.pool_attention = nn.MultiheadAttention(
-                cfg.r_dim, cfg.num_heads, dropout=cfg.dropout, batch_first=True
-            )
-            self.pool_norm = nn.LayerNorm(cfg.r_dim)
+            self.pool_query = nn.Parameter(torch.empty(1, cfg.n_latent_slots, cfg.r_dim))
+            nn.init.xavier_uniform_(self.pool_query)
+            self.pool_attention = MultiheadAttention(cfg.r_dim, cfg.num_heads, cfg.dropout)
         elif cfg.use_latent and cfg.pooling == "mean":
             if cfg.n_latent_slots > 1:
                 self.mean_pre_proj = nn.Sequential(
@@ -315,10 +313,7 @@ class NeuralProcess(nn.Module, ABC):
         """A point set (B, N, r_dim) -> one vector (B, n_latent_slots * r_dim), as set by cfg.pooling."""
         if self.cfg.pooling == "attention":
             query = self.pool_query.expand(points.shape[0], -1, -1)          # (B, K, r_dim)
-            out, _ = self.pool_attention(
-                query, points, points, key_padding_mask=mask, need_weights=False
-            )                                                                # (B, K, r_dim)
-            out = self.pool_norm(out)
+            out = self.pool_attention(query, points, points, key_padding_mask=mask)  # (B, K, r_dim)
             return out.flatten(start_dim=1)                                  # (B, K * r_dim)
         return masked_mean(self.mean_pre_proj(points), mask)                 # (B, K * r_dim)
 
